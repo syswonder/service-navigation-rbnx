@@ -35,6 +35,8 @@ package:
   description: Nav2 service wrapper exposing service/navigation/* over gRPC.
   license: Apache-2.0
 
+capability_id: nav2
+
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
