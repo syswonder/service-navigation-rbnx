@@ -1,32 +1,69 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Build phase: rbnx codegen only. We do NOT vendor or build nav2
-# itself — it's installed system-wide via apt:
-#   sudo apt install ros-humble-nav2-bringup ros-humble-navigation2
-# (This is the same path the robot was already using.)
+# nav2_wrapper build phase. Runs `rbnx codegen`, then builds for the
+# selected deployment target (same pattern as mapping_rbnx).
+#
+# Target is chosen by the per-target package manifest's `build:` line:
+#   x86-docker     x86_64 + docker, ROS2+Nav2 in image (docker/Dockerfile) [default]
+#   jetson-docker  arm64 Jetson + docker (same Dockerfile; ros:humble base
+#                  is multi-arch, so it builds arm64 on a Jetson)
+#   jetson-native  arm64 Jetson + host ROS2 — no docker; verify the host
+#                  has ros-humble-nav2-bringup.
 set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 CLEAN="${RBNX_BUILD_CLEAN:-}"
+IMG="${ROBONIX_NAV2_IMAGE:-robonix-nav2}"
+TARGET="${RBNX_BUILD_TARGET:-x86-docker}"
 
 if [[ "$CLEAN" == "1" ]]; then
-    echo "[nav2_wrapper/build] clean: removing rbnx-build/"
+    echo "[nav2/build] clean: removing rbnx-build/"
     rm -rf rbnx-build
 fi
 mkdir -p rbnx-build/data
 
-# Sanity check that nav2_bringup is on the system. Soft-warn on miss
-# (build still succeeds; user can apt install before `rbnx boot`).
-if ! ros2 pkg list 2>/dev/null | grep -q "^nav2_bringup$"; then
-    echo "[nav2_wrapper/build] NOTE: nav2_bringup not found in 'ros2 pkg list'."
-    echo "                     Install with:"
-    echo "                       sudo apt install ros-humble-nav2-bringup ros-humble-navigation2"
+# ── 1. Codegen (atlas + IDL stubs) — every target ───────────────────────────
+if command -v rbnx >/dev/null 2>&1; then
+    FLAGS=()
+    [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
+    echo "[nav2/build] rbnx codegen ${FLAGS[*]}"
+    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+else
+    echo "[nav2/build] WARNING: rbnx not in PATH — skipping proto codegen"
 fi
 
-FLAGS=(--out-dir "$PKG/rbnx-build/codegen")
-[[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
-echo "[nav2_wrapper/build] rbnx codegen ${FLAGS[*]}"
-rbnx codegen -p "$PKG" "${FLAGS[@]}"
+echo "[nav2/build] target=$TARGET"
+
+# ── 2. Per-target build ─────────────────────────────────────────────────────
+case "$TARGET" in
+    x86-docker|jetson-docker)
+        if ! command -v docker >/dev/null 2>&1; then
+            echo "[nav2/build] error: target $TARGET needs docker on PATH" >&2
+            exit 1
+        fi
+        DOCKER_BUILD_FLAGS=(--network=host)
+        [[ "$CLEAN" == "1" ]] && DOCKER_BUILD_FLAGS+=(--no-cache)
+        echo "[nav2/build] docker build -f docker/Dockerfile -t $IMG"
+        docker build "${DOCKER_BUILD_FLAGS[@]}" -f docker/Dockerfile -t "$IMG" docker/
+        ;;
+    jetson-native)
+        echo "[nav2/build] native target — verifying host ROS2 + nav2"
+        if ! command -v ros2 >/dev/null 2>&1; then
+            echo "[nav2/build] ERROR: ros2 not on PATH — source /opt/ros/humble/setup.bash" >&2
+            exit 1
+        fi
+        if ! ros2 pkg list 2>/dev/null | grep -q "^nav2_bringup$"; then
+            echo "[nav2/build] ERROR: nav2_bringup not installed. On the host run:" >&2
+            echo "[nav2/build]   sudo apt install ros-humble-nav2-bringup ros-humble-navigation2" >&2
+            exit 1
+        fi
+        echo "[nav2/build] host nav2_bringup OK"
+        ;;
+    *)
+        echo "[nav2/build] unknown RBNX_BUILD_TARGET: $TARGET (x86-docker|jetson-docker|jetson-native)" >&2
+        exit 2
+        ;;
+esac
 
 touch "$PKG/rbnx-build/.rbnx-built"
-echo "[nav2_wrapper/build] done."
+echo "[nav2/build] done (target=$TARGET)."
