@@ -2,7 +2,7 @@
 
 Robonix service package that wraps a standard [Nav2](https://navigation.ros.org/)
 stack and owns the `robonix/service/navigation/*` capability. It routes the
-Robonix gRPC contracts (`navigate`, `status`, `cancel`) onto Nav2's
+Robonix gRPC/MCP contracts (`navigate`, `navigate/status`, `navigate/cancel`) onto Nav2's
 `navigate_to_pose` action, and discovers every topic it consumes (`/map`,
 `/odom`, `/scan`) through atlas — so the same package drops onto any body that
 publishes those contracts, in simulation or on real hardware.
@@ -18,12 +18,12 @@ target; everything else is resolved at runtime.
 | Contract                              | Transport | Handler                                                 |
 | ------------------------------------- | --------- | ------------------------------------------------------- |
 | `robonix/service/navigation/driver`   | gRPC      | `Driver(CMD_INIT/SHUTDOWN, …)` — lifecycle (Service)    |
-| `robonix/service/navigation/navigate` | gRPC      | `Navigate(PoseStamped)` → dispatches a Nav2 action goal |
-| `robonix/service/navigation/status`   | gRPC      | `GetNavigationStatus(goal_id)` → status from cache      |
-| `robonix/service/navigation/cancel`   | gRPC      | `CancelNavigation(goal_id)` → Nav2 `cancel_goal_async`  |
+| `robonix/service/navigation/navigate` | gRPC + MCP | `Navigate(PoseStamped)` → dispatches a Nav2 action goal |
+| `robonix/service/navigation/navigate/status` | gRPC + MCP | `GetNavigationStatus(run_id)` → status from cache |
+| `robonix/service/navigation/navigate/cancel` | gRPC + MCP | `CancelNavigation(run_id)` → Nav2 `cancel_goal_async` |
 
-The driver + the three data contracts are all hosted on one auto-allocated gRPC
-port and declared on atlas by `robonix_api.Service.run()`. `navigate` / `status`
+The driver + the three data contracts are hosted and declared on atlas by
+`robonix_api.Service.run()`. `navigate` / `status`
 / `cancel` are live from process start; each guards on the rclpy node, so a call
 that lands before `CMD_INIT` finishes returns a clean "not initialized" instead
 of crashing.

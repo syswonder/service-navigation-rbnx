@@ -10,9 +10,9 @@ subprocess.
 | contract | transport | notes |
 |---|---|---|
 | `robonix/service/navigation/driver` | grpc | Driver lifecycle (INIT/SHUTDOWN) |
-| `robonix/service/navigation/navigate` | grpc | navigate-to-pose action entry |
-| `robonix/service/navigation/status` | grpc | current navigation status |
-| `robonix/service/navigation/cancel` | grpc | cancel the active goal |
+| `robonix/service/navigation/navigate` | grpc + mcp | navigate-to-pose action entry |
+| `robonix/service/navigation/navigate/status` | grpc + mcp | current navigation status |
+| `robonix/service/navigation/navigate/cancel` | grpc + mcp | cancel the active goal |
 
 The three RPCs are backend-agnostic — identical to `simple_nav_rbnx`, so the
 two are interchangeable from a consumer's view.

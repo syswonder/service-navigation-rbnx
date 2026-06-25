@@ -21,5 +21,5 @@ start: ROBONIX_NAV2_FORCE=docker bash scripts/start.sh
 capabilities:
   - name: robonix/service/navigation/driver
   - name: robonix/service/navigation/navigate
-  - name: robonix/service/navigation/status
-  - name: robonix/service/navigation/cancel
+  - name: robonix/service/navigation/navigate/status
+  - name: robonix/service/navigation/navigate/cancel
