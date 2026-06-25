@@ -66,13 +66,16 @@ cd <robonix>/examples/webots
 rbnx boot -f nav2_test.yaml                      # nav2 reaches ACTIVE
 
 # 3. send a goal over the navigate gRPC and watch /cmd_vel move the robot
-#    (goal in the odom frame for the sim profile; see Params profiles)
+#    (goal in the map frame for the sim profile; see Params profiles)
 ```
 
-The `sim` params profile navigates in the **odom frame with a rolling-window
-global costmap** — it needs only `/odom` + a 2D `/scan`, no SLAM `map→odom` TF
-and no AMCL. That is the portable default; it works on any body that publishes
-odom + a laser, in sim or on real hardware.
+The `sim` params profile navigates in the **map frame with online SLAM**: an
+rtabmap mapping provider publishes both a live `/map` and a `map→odom` TF. Both
+costmaps anchor in `map` and a `StaticLayer` tracks `/map` as it grows
+(`map_subscribe_transient_local`), so the robot maps and navigates at the same
+time — obstacles populate the costmaps straight from the SLAM grid, and the
+`ObstacleLayer` adds anything not yet mapped. It needs a SLAM provider that
+owns `map→odom` (rtabmap in the Webots example); no AMCL or pre-built map.
 
 ## Deployment targets
 
@@ -128,11 +131,11 @@ an operator's tuning lives outside the package.
 
 ### Params profiles
 
-| Profile   | Global costmap frame | Localization | Use when                                          |
-| --------- | -------------------- | ------------ | ------------------------------------------------- |
-| `sim`     | `odom` (rolling)     | none         | Webots / any body with odom + 2D scan, no SLAM TF |
-| `slam`    | `map`                | AMCL + map   | Real deploy with a SLAM `map→odom` TF + static map |
-| `default` | `map`                | AMCL + map   | Generic map-based navigation                       |
+| Profile   | Global costmap frame | Localization      | Use when                                          |
+| --------- | -------------------- | ----------------- | ------------------------------------------------- |
+| `sim`     | `map` (static layer) | online SLAM (rtabmap) | Webots / any body with a SLAM provider publishing `/map` + `map→odom`, mapping while navigating |
+| `slam`    | `map`                | AMCL + map        | Real deploy with a SLAM `map→odom` TF + static map |
+| `default` | `map`                | AMCL + map        | Generic map-based navigation                       |
 
 ## Atlas contract dependencies
 
@@ -167,13 +170,13 @@ config:
 
 ## TF prerequisites
 
-Nav2 needs a healthy `odom → base_link → sensor` TF chain (plus `map → odom` for
-the `slam` / `default` profiles). TF is still a global ROS side-channel, not an
-atlas contract. The convention: the SLAM provider owns `map → odom`, the chassis
-provider owns `odom → base_link`, and a body-description provider owns
-`base_link → sensor_*` via `robot_state_publisher`. The `sim` profile avoids the
-`map → odom` requirement entirely (odom-frame costmap), which is why it works in
-Webots without a published SLAM map TF.
+Nav2 needs a healthy `odom → base_link → sensor` TF chain plus `map → odom` for
+all three profiles (`sim` included — it navigates in the map frame). TF is still
+a global ROS side-channel, not an atlas contract. The convention: the SLAM
+provider owns `map → odom`, the chassis provider owns `odom → base_link`, and a
+body-description provider owns `base_link → sensor_*` via `robot_state_publisher`.
+Under `sim`, an online-SLAM provider (rtabmap in the Webots example) supplies
+both `map → odom` and the `/map` the costmaps' static layer consumes.
 
 If your costmap references `/scan` but only `primitive/lidar/lidar3d`
 (PointCloud2) is on atlas, the image ships `pointcloud_to_laserscan` — add it to
