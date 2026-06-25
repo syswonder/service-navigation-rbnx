@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# nav2_wrapper build phase. Runs `rbnx codegen`, then builds for the
+# nav2_wrapper build phase. Runs `rbnx codegen --mcp`, then builds for the
 # selected deployment target (same pattern as mapping_rbnx).
 #
 # Target is chosen by the per-target package manifest's `build:` line:
@@ -26,8 +26,8 @@ mkdir -p rbnx-build/data
 if command -v rbnx >/dev/null 2>&1; then
     FLAGS=()
     [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
-    echo "[nav2/build] rbnx codegen ${FLAGS[*]}"
-    rbnx codegen -p "$PKG" "${FLAGS[@]}"
+    echo "[nav2/build] rbnx codegen --mcp ${FLAGS[*]}"
+    rbnx codegen -p "$PKG" --mcp "${FLAGS[@]}"
 else
     echo "[nav2/build] WARNING: rbnx not in PATH — skipping proto codegen"
 fi

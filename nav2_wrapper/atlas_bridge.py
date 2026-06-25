@@ -6,8 +6,8 @@ Wraps system-installed nav2_bringup. Owns service/navigation/*.
 
 Spawn order:
   1. start.sh launches THIS process — no nav2 spawn yet.
-  2. main() starts the gRPC server (Driver + Navigate + Status + Cancel
-     servicers), RegisterCapability, declares ONLY service/navigation/driver.
+  2. main() starts the Driver server plus Navigate/Status/Cancel gRPC
+     servicers and MCP tools, then registers with atlas.
   3. rbnx boot calls Driver(CMD_INIT, config_json).
   4. Init handler: pick params_file from config, spawn `ros2 launch
      nav2_bringup navigation_launch.py …`, wait for the navigate_to_pose
@@ -26,7 +26,6 @@ Config (passed via Driver(CMD_INIT, config_json)):
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -37,7 +36,6 @@ import sys
 import threading
 import time
 import uuid
-from concurrent import futures
 from pathlib import Path
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
@@ -48,18 +46,29 @@ log = logging.getLogger("nav2_wrapper")
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
-        pg = d / "rbnx-build" / "codegen" / "proto_gen"
+        codegen = d / "rbnx-build" / "codegen"
+        pg = codegen / "proto_gen"
         if pg.is_dir() and (pg / "atlas_pb2.py").exists():
             sys.path.insert(0, str(pg))
+            mt = codegen / "robonix_mcp_types"
+            if mt.is_dir():
+                sys.path.insert(0, str(mt))
             return
         d = d.parent
 
 
 _ensure_proto_gen()
 
-import grpc  # noqa: E402
 import navigation_pb2  # noqa: E402
 import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+from navigation_mcp import (  # noqa: E402
+    Navigate_Request as McpNavigateRequest,
+    Navigate_Response as McpNavigateResponse,
+    GetNavigationStatus_Request as McpStatusRequest,
+    GetNavigationStatus_Response as McpStatusResponse,
+    CancelNavigation_Request as McpCancelRequest,
+    CancelNavigation_Response as McpCancelResponse,
+)
 
 # Current Robonix provider API (same one mapping_rbnx uses). The Service
 # class owns atlas registration, the Driver(CMD_INIT/SHUTDOWN) lifecycle
@@ -92,6 +101,7 @@ _GoalStatus = None
 _nav_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 _goal_states: dict[str, dict] = {}
 _goal_handles: dict[str, object] = {}
+_last_run_id = ""
 # Whether nav2 (and therefore the TF tree it consumes) runs on /clock sim
 # time. The wrapper's own rclpy node must match: it stamps goal poses with
 # node.get_clock().now(), and if that clock is wall time while map->odom TF
@@ -360,23 +370,38 @@ def _goal_status_name(status: int) -> str:
     return m.get(int(status), str(int(status)))
 
 
+def _canonical_state(nav2_state: str) -> str:
+    """Map Nav2 action result/status names to executor async state names."""
+    return {
+        "UNKNOWN": "RUNNING",
+        "ACCEPTED": "RUNNING",
+        "EXECUTING": "RUNNING",
+        "CANCELING": "RUNNING",
+        "SUCCEEDED": "SUCCEEDED",
+        "CANCELED": "CANCELED",
+        "ABORTED": "FAILED",
+    }.get(nav2_state, "FAILED")
+
+
+def _resolve_run_id(run_id: str) -> str:
+    """Use the explicit run id, or fall back to the most recent navigation run."""
+    return run_id or _last_run_id
+
+
 def _goal_response_cb(fut, gid: str):
     try:
         gh = fut.result()
     except Exception as e:  # noqa: BLE001
         with _state_lock:
-            _goal_states[gid] = {"status": "FAILED", "accepted": False,
-                                 "terminal": True, "error": str(e)}
+            _goal_states[gid] = {"state": "FAILED", "detail": str(e)}
         return
     if not gh.accepted:
         with _state_lock:
-            _goal_states[gid] = {"status": "REJECTED", "accepted": False,
-                                 "terminal": True}
+            _goal_states[gid] = {"state": "FAILED", "detail": "goal rejected"}
         return
     with _state_lock:
         _goal_handles[gid] = gh
-        _goal_states[gid] = {"status": "ACCEPTED", "accepted": True,
-                             "terminal": False}
+        _goal_states[gid] = {"state": "RUNNING", "detail": "goal accepted"}
     res_fut = gh.get_result_async()
     res_fut.add_done_callback(lambda f: _result_cb(f, gid))
 
@@ -385,14 +410,13 @@ def _result_cb(fut, gid: str):
     try:
         res = fut.result()
         st_name = _goal_status_name(getattr(res, "status", -1))
+        state = _canonical_state(st_name)
         with _state_lock:
-            _goal_states[gid] = {"status": st_name, "accepted": True,
-                                 "terminal": True}
+            _goal_states[gid] = {"state": state, "detail": st_name.lower()}
             _goal_handles.pop(gid, None)
     except Exception as e:  # noqa: BLE001
         with _state_lock:
-            _goal_states[gid] = {"status": "FAILED", "accepted": True,
-                                 "terminal": True, "error": str(e)}
+            _goal_states[gid] = {"state": "FAILED", "detail": str(e)}
             _goal_handles.pop(gid, None)
 
 
@@ -402,14 +426,13 @@ def _dispatch_goal(node, gid: str, payload: dict):
     goal_msg.pose = pose
     if _nav_action_client is None or not _nav_action_ready:
         with _state_lock:
-            _goal_states[gid] = {"status": "REJECTED", "accepted": False,
-                                 "terminal": True,
-                                 "error": "nav action server not ready"}
+            _goal_states[gid] = {"state": "FAILED",
+                                 "detail": "nav action server not ready"}
         return
     send_future = _nav_action_client.send_goal_async(goal_msg)
     send_future.add_done_callback(lambda f, g=gid: _goal_response_cb(f, g))
     with _state_lock:
-        _goal_states[gid] = {"status": "SENT", "accepted": False, "terminal": False}
+        _goal_states[gid] = {"state": "RUNNING", "detail": "goal sent"}
 
 
 # ── lifecycle (Driver CMD_INIT / CMD_SHUTDOWN via robonix_api.Service) ────────
@@ -427,7 +450,7 @@ def init(cfg: dict):
       3. Bring up the rclpy node + navigate_to_pose ActionClient and wait
          for nav2's lifecycle to advertise the action server.
 
-    The navigate/status/cancel gRPC interfaces are hosted + declared by
+    The navigate/status/cancel gRPC and MCP interfaces are hosted + declared by
     run() (see attach_grpc_servicer below); each guards on `_ros_node`, so
     a call landing before nav2 is ready returns a clean 'not initialized'."""
     global _initialized
@@ -473,71 +496,104 @@ def shutdown():
     return Ok()
 
 
-# ── gRPC servicers ───────────────────────────────────────────────────────────
+# ── navigation RPC/MCP shared implementation ─────────────────────────────────
 def _quat_to_yaw(z: float, w: float) -> float:
     return 2.0 * math.atan2(z, w)
 
 
+def _navigate_impl(goal) -> dict:
+    """Queue a Nav2 goal and return the contract-level response fields."""
+    global _last_run_id
+    if _ros_node is None:
+        return {"accepted": False, "run_id": "", "detail": "ROS2 not initialized"}
+    run_id = str(uuid.uuid4())
+    frame_id = goal.header.frame_id or "map"
+    yaw = _quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
+    _nav_queue.put((run_id, {
+        "frame_id": frame_id,
+        "x": float(goal.pose.position.x),
+        "y": float(goal.pose.position.y),
+        "yaw": float(yaw),
+    }))
+    with _state_lock:
+        _last_run_id = run_id
+        _goal_states[run_id] = {"state": "PENDING", "detail": "queued"}
+    return {"accepted": True, "run_id": run_id, "detail": "queued"}
+
+
+def _status_impl(run_id: str) -> dict:
+    """Return state/detail for an explicit run id, or the most recent run."""
+    with _state_lock:
+        resolved = _resolve_run_id(run_id)
+        st = _goal_states.get(resolved)
+    if st is None:
+        return {"known": False, "state": "FAILED", "detail": "unknown run_id"}
+    return {
+        "known": True,
+        "state": st.get("state", "FAILED"),
+        "detail": st.get("detail", ""),
+    }
+
+
+def _cancel_impl(run_id: str) -> dict:
+    """Cancel an explicit run id, or the most recent active navigation run."""
+    with _state_lock:
+        resolved = _resolve_run_id(run_id)
+        gh = _goal_handles.get(resolved)
+    if gh is None:
+        return {"accepted": False, "detail": "no active goal handle"}
+    try:
+        gh.cancel_goal_async()  # type: ignore[union-attr]
+    except Exception as e:  # noqa: BLE001
+        return {"accepted": False, "detail": f"cancel failed: {e}"}
+    return {"accepted": True, "detail": "cancel requested"}
+
+
+# ── gRPC servicers ───────────────────────────────────────────────────────────
 class _NavigateServicer(contracts_grpc.RobonixServiceNavigationNavigateServicer):
     def Navigate(self, request, context):
-        if _ros_node is None:
-            return navigation_pb2.Navigate_Response(
-                accepted=False, status_message="ROS2 not initialized"
-            )
-        gid = str(uuid.uuid4())
-        # request.goal is a geometry_msgs/PoseStamped per the contract IDL.
-        goal = request.goal
-        frame_id = goal.header.frame_id or "map"
-        yaw = _quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
-        _nav_queue.put((gid, {
-            "frame_id": frame_id,
-            "x": float(goal.pose.position.x),
-            "y": float(goal.pose.position.y),
-            "yaw": float(yaw),
-        }))
-        with _state_lock:
-            _goal_states[gid] = {"status": "QUEUED", "accepted": False,
-                                 "terminal": False}
-        return navigation_pb2.Navigate_Response(
-            accepted=True,
-            status_message=json.dumps({"goal_id": gid, "status": "queued"}),
-        )
+        out = _navigate_impl(request.goal)
+        return navigation_pb2.Navigate_Response(**out)
 
 
-class _StatusServicer(contracts_grpc.RobonixServiceNavigationStatusServicer):
+class _StatusServicer(contracts_grpc.RobonixServiceNavigationNavigateStatusServicer):
     def GetNavigationStatus(self, request, context):
-        gid = request.goal_id
-        with _state_lock:
-            st = _goal_states.get(gid)
-        if st is None:
-            return navigation_pb2.GetNavigationStatus_Response(
-                known=False, status="unknown", terminal=True,
-            )
-        return navigation_pb2.GetNavigationStatus_Response(
-            known=True,
-            status=st.get("status", "UNKNOWN"),
-            terminal=bool(st.get("terminal", False)),
-        )
+        out = _status_impl(request.run_id)
+        return navigation_pb2.GetNavigationStatus_Response(**out)
 
 
-class _CancelServicer(contracts_grpc.RobonixServiceNavigationCancelServicer):
+class _CancelServicer(contracts_grpc.RobonixServiceNavigationNavigateCancelServicer):
     def CancelNavigation(self, request, context):
-        gid = request.goal_id
-        with _state_lock:
-            gh = _goal_handles.get(gid)
-        if gh is None:
-            return navigation_pb2.CancelNavigation_Response(
-                accepted=False, message="no active goal handle",
-            )
-        try:
-            gh.cancel_goal_async()  # type: ignore[union-attr]
-        except Exception as e:  # noqa: BLE001
-            return navigation_pb2.CancelNavigation_Response(
-                accepted=False, message=f"cancel failed: {e}",
-            )
-        return navigation_pb2.CancelNavigation_Response(
-            accepted=True, message="cancel_requested",
-        )
+        out = _cancel_impl(request.run_id)
+        return navigation_pb2.CancelNavigation_Response(**out)
+
+
+# ── MCP tools ────────────────────────────────────────────────────────────────
+@nav.mcp("robonix/service/navigation/navigate")
+def navigate(req: McpNavigateRequest) -> McpNavigateResponse:
+    """Start a Nav2 NavigateToPose run. Returns a run_id for status/cancel."""
+    out = _navigate_impl(req.goal)
+    if not out["accepted"]:
+        raise RuntimeError(out["detail"])
+    return McpNavigateResponse(**out)
+
+
+@nav.mcp("robonix/service/navigation/navigate/status")
+def status(req: McpStatusRequest) -> McpStatusResponse:
+    """Poll a navigation run. Empty run_id means the most recent run."""
+    out = _status_impl(req.run_id)
+    if not out["known"]:
+        raise RuntimeError(out["detail"])
+    return McpStatusResponse(**out)
+
+
+@nav.mcp("robonix/service/navigation/navigate/cancel")
+def cancel(req: McpCancelRequest) -> McpCancelResponse:
+    """Cancel a navigation run. Empty run_id means the most recent active run."""
+    out = _cancel_impl(req.run_id)
+    if not out["accepted"]:
+        raise RuntimeError(out["detail"])
+    return McpCancelResponse(**out)
 
 
 # ── attach the navigate/status/cancel gRPC servicers ─────────────────────────
@@ -546,13 +602,13 @@ class _CancelServicer(contracts_grpc.RobonixServiceNavigationCancelServicer):
 # guards on `_ros_node`, so a call before CMD_INIT finishes returns a clean
 # 'not initialized' rather than crashing.
 nav.attach_grpc_servicer("robonix/service/navigation/navigate", _NavigateServicer())
-nav.attach_grpc_servicer("robonix/service/navigation/status", _StatusServicer())
-nav.attach_grpc_servicer("robonix/service/navigation/cancel", _CancelServicer())
+nav.attach_grpc_servicer("robonix/service/navigation/navigate/status", _StatusServicer())
+nav.attach_grpc_servicer("robonix/service/navigation/navigate/cancel", _CancelServicer())
 
 
 def main() -> int:
     """Blocking. Service.run() registers nav2 with atlas, serves the Driver
-    lifecycle + navigate/status/cancel gRPC, heartbeats, and dispatches
+    lifecycle + navigate/status/cancel gRPC/MCP, heartbeats, and dispatches
     CMD_INIT/CMD_SHUTDOWN to the on_init / on_shutdown callbacks above."""
     nav.run()
     return 0
