@@ -3,7 +3,7 @@ amcl:
     use_sim_time: True
     transform_tolerance: 0.3
     tf_broadcast: true
-    scan_topic: /scanner
+    scan_topic: /scanner_normalized
     min_particles: 300
     max_particles: 2000
     odom_frame_id: "odom"
@@ -29,11 +29,9 @@ map_server:
 bt_navigator:
   ros__parameters:
     use_sim_time: True
-    # odom frame: navigate without a SLAM map→odom TF / localization. The
-    # global costmap rolls with the robot in odom (see global_costmap). This
-    # is the portable default — works on any body that publishes odom +
-    # a 2D scan, in sim or on real hardware, with no AMCL dependency.
-    global_frame: odom
+    # map frame: rtabmap provides the map->odom TF (online SLAM), so the BT
+    # navigator plans in the same map frame as the costmaps.
+    global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 50
@@ -175,7 +173,10 @@ local_costmap:
       update_frequency: 5.0
       publish_frequency: 2.0
       transform_tolerance: 0.3
-      global_frame: odom  # local costmap rolls in odom frame
+      # map frame: rtabmap publishes both /map and a map->odom TF, so the
+      # costmap is anchored in the SLAM map (same as the proven tiago_demo
+      # config). The rolling window crops the map around the robot.
+      global_frame: map
       robot_base_frame: base_link
       use_sim_time: true
       rolling_window: true
@@ -183,7 +184,13 @@ local_costmap:
       height: 5
       resolution: 0.05
       robot_radius: 0.22
-      plugins: ["obstacle_layer", "inflation_layer"]
+      # static_layer first: the rolling local window is cropped from the live
+      # rtabmap /map, so the local controller (DWB) sees mapped walls and
+      # avoids them reactively. obstacle_layer adds anything not yet mapped.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -209,22 +216,22 @@ global_costmap:
     ros__parameters:
       update_frequency: 1.0
       publish_frequency: 1.0
-      # Rolling window in odom: no SLAM map / map→odom TF required. The
-      # costmap is a fixed-size square that follows the robot, populated
-      # from the live 2D scan. For map-based global planning (AMCL +
-      # static map), use the 'slam'/'default' profile instead.
-      global_frame: odom
+      # map frame, online SLAM: rtabmap publishes a live /map (growing as the
+      # robot explores) plus a map->odom TF. The static_layer tracks /map
+      # updates (map_subscribe_transient_local) so the costmap follows the
+      # map as it grows — mapping and navigating at the same time. The
+      # obstacle_layer adds anything not yet in the map; allow_unknown lets
+      # the planner route through not-yet-mapped space.
+      global_frame: map
       robot_base_frame: base_link
-      rolling_window: true
+      rolling_window: false
       width: 12
       height: 12
       use_sim_time: True
       robot_radius: 0.22
       resolution: 0.05
-      track_unknown_space: false
-      # No static_layer: there is no map→odom TF in this profile. Obstacles
-      # come from the laser; inflation keeps the robot clear of them.
-      plugins: ["obstacle_layer", "inflation_layer"]
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -285,7 +292,7 @@ behavior_server:
       plugin: "nav2_behaviors/Wait"
     assisted_teleop:
       plugin: "nav2_behaviors/AssistedTeleop"
-    global_frame: odom
+    global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.1
     use_sim_time: true
