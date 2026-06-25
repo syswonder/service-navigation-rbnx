@@ -92,6 +92,12 @@ _GoalStatus = None
 _nav_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 _goal_states: dict[str, dict] = {}
 _goal_handles: dict[str, object] = {}
+# Whether nav2 (and therefore the TF tree it consumes) runs on /clock sim
+# time. The wrapper's own rclpy node must match: it stamps goal poses with
+# node.get_clock().now(), and if that clock is wall time while map->odom TF
+# is published on sim time, every goal lookup hits a ~decades extrapolation
+# error and the planner aborts. Set from cfg in init().
+_USE_SIM_TIME = False
 
 
 def _import_ros2() -> None:
@@ -271,8 +277,18 @@ def _start_ros2_thread() -> None:
         import rclpy  # type: ignore
         from rclpy.executors import MultiThreadedExecutor  # type: ignore
         from rclpy.action import ActionClient  # type: ignore
+        from rclpy.parameter import Parameter  # type: ignore
+
         rclpy.init(args=None)
-        node = rclpy.create_node("nav2_wrapper_atlas_bridge")
+        # use_sim_time must match nav2 / the TF tree (see _USE_SIM_TIME) so
+        # node.get_clock() — which timestamps goal poses — is on the same
+        # clock domain as the map->odom transform.
+        node = rclpy.create_node(
+            "nav2_wrapper_atlas_bridge",
+            parameter_overrides=[
+                Parameter("use_sim_time", Parameter.Type.BOOL, _USE_SIM_TIME)
+            ],
+        )
         _ros_node = node
         _import_ros2()
         _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
@@ -306,7 +322,20 @@ def _wait_for_action(timeout_s: float) -> bool:
 def _make_pose(node, frame_id: str, x: float, y: float, yaw: float):
     g = _PoseStamped()
     g.header.frame_id = frame_id
-    g.header.stamp = node.get_clock().now().to_msg()
+    # Leave the goal stamp at 0 (the message default). A zero stamp tells
+    # tf2 "use the LATEST available transform" instead of requiring the
+    # frame_id->costmap transform at one exact instant. This is the
+    # environment-agnostic fix for the "goal aborts with Extrapolation
+    # Error" failure:
+    #   - webots/sim: node clock and the map->odom TF can sit in different
+    #     clock domains; a "now()" stamp lands decades away from the TF.
+    #   - real robot: use_sim_time is false, but sensor/SLAM TF still lags
+    #     wall-clock "now" by tens of ms, so a "now()" stamp can fall past
+    #     the newest TF and extrapolate into the future.
+    # Stamping 0 sidesteps both — the planner transforms against whatever
+    # TF is currently buffered, which is exactly what "go to this pose"
+    # means. (node is kept use_sim_time-consistent for action timing, but
+    # the goal transform no longer depends on clock alignment at all.)
     g.pose.position.x = float(x)
     g.pose.position.y = float(y)
     g.pose.position.z = 0.0
@@ -414,6 +443,9 @@ def init(cfg: dict):
             f"missing required atlas contracts: {missing} "
             f"(awaiting upstream provider)"
         )
+
+    global _USE_SIM_TIME
+    _USE_SIM_TIME = bool(cfg.get("use_sim_time", False))
 
     try:
         _spawn_nav2(cfg, remap_args)
