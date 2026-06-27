@@ -87,7 +87,7 @@ controller_server:
       # TUNE on the real base: lower bound = measured per-rotation drift radius;
       # too large and the robot starts rotating to final yaw too early (well
       # before reaching the goal). 0.80 is a starting point for ~0.3 m drift.
-      RotateToGoal.xy_goal_tolerance: 0.80
+      RotateToGoal.xy_goal_tolerance: 1.50  # commit to in-place final rotation early; never re-trigger goto-xy near goal
       RotateToGoal.yaw_goal_tolerance: 0.50
       RotateToGoal.scale: 1.0
       RotateToGoal.slowing_factor: 1.0
