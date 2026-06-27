@@ -76,7 +76,18 @@ controller_server:
       # GoalAlign.forward_preference: true
       PathDist.scale: 0.5
       GoalDist.scale: 2.0
-      RotateToGoal.xy_goal_tolerance: 0.50
+      # RotateToGoal switches DWB into in-place final rotation when within this
+      # XY radius of the goal. A large 4-wheel base drifts in XY *while* rotating
+      # (kinematic wheel-scrub — independent of rotation speed); if that drift
+      # exceeds this radius DWB drops out of rotation and re-translates, causing
+      # the rotate→drift→re-translate oscillation at the goal. Set it WIDER than
+      # the goal-checker xy tolerance (0.50) so DWB keeps rotating through the
+      # drift instead of bouncing back (stateful goal-checker already latches
+      # "xy reached", so the final pose error stays bounded by the drift).
+      # TUNE on the real base: lower bound = measured per-rotation drift radius;
+      # too large and the robot starts rotating to final yaw too early (well
+      # before reaching the goal). 0.80 is a starting point for ~0.3 m drift.
+      RotateToGoal.xy_goal_tolerance: 0.80
       RotateToGoal.yaw_goal_tolerance: 0.50
       RotateToGoal.scale: 1.0
       RotateToGoal.slowing_factor: 1.0
