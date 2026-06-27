@@ -67,7 +67,7 @@ controller_server:
       short_circuit_trajectory_evaluation: True
       stateful: True
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.015
+      BaseObstacle.scale: 0.05
       PathAlign.scale: 1.0
       # PathAlign.forward_point_distance: 0.1
       # PathAlign.forward_preference: true
@@ -118,7 +118,7 @@ local_costmap:
       height: 3
       resolution: 0.05
       footprint: "[ [0.34, 0.23], [0.34, -0.23], [-0.34, -0.23], [-0.34, 0.23] ]"
-      footprint_padding: 0.10
+      footprint_padding: 0.13
       # robot_radius: 0.32
       
       plugins: ["obstacle_layer", "inflation_layer"]
@@ -139,7 +139,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         inflation_radius: 0.40
-        cost_scaling_factor: 3.0
+        cost_scaling_factor: 2.2
 
 
 global_costmap:
@@ -150,7 +150,7 @@ global_costmap:
       robot_base_frame: base_link
       # robot_radius: 0.32
       footprint: "[ [0.34, 0.23], [0.34, -0.23], [-0.34, -0.23], [-0.34, 0.23] ]"
-      footprint_padding: 0.10
+      footprint_padding: 0.13
       update_frequency: 1.0      # update rate (Hz); may be lower than local_costmap
       publish_frequency: 1.0     # publish rate (Hz)
       resolution: 0.05           # resolution; match the map
@@ -178,7 +178,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         inflation_radius: 0.60
-        cost_scaling_factor: 3.0
+        cost_scaling_factor: 2.2
 
 
 lifecycle_manager:
