@@ -43,6 +43,15 @@ logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
 log = logging.getLogger("nav2_wrapper")
 
 
+def _pump_output(stream, tag: str) -> None:
+    """Forward a child process's merged stdout/stderr into scribe via the
+    package logger — one unified log stream, no side-car *.log file."""
+    for raw in iter(stream.readline, b""):
+        line = raw.decode(errors="replace").rstrip()
+        if line:
+            log.info("[%s] %s", tag, line)
+
+
 def _ensure_proto_gen() -> None:
     d = Path(__file__).resolve().parent
     while d.parent != d:
@@ -250,16 +259,13 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     # rewrite the params YAML with substitutions for nodes that read
     # topic names from params rather than via remap.)
     args.extend(remap_args)
-    log_path = _pkg_root / "rbnx-build" / "data" / "nav2.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Truncate per spawn so the log reflects only the current bring-up
-    # (appending across re-deploys makes the lifecycle trace unreadable).
-    log_fh = open(log_path, "wb", buffering=0)
-    log.info("spawning nav2 (params=%s, remaps=%s) → %s",
-             params_file, remap_args, log_path)
+    log.info("spawning nav2 (params=%s, remaps=%s)", params_file, remap_args)
     _nav2_proc = subprocess.Popen(
-        args, stdout=log_fh, stderr=log_fh, start_new_session=True,
+        args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
+    threading.Thread(target=_pump_output, args=(_nav2_proc.stdout, "nav2"),
+                     daemon=True).start()
 
 
 def _kill_nav2() -> None:
