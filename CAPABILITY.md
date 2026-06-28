@@ -1,3 +1,7 @@
+---
+description: Goal-based navigation — wraps a ROS 2 Nav2 stack as the robonix navigation service; drives the base to 2D goals in the mapped scene.
+---
+
 # nav2_wrapper_rbnx — capability surface
 
 Wraps a system-installed ROS2 **Nav2** stack as a Robonix navigation service.
