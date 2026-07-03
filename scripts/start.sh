@@ -59,6 +59,17 @@ trap cleanup EXIT INT TERM
 docker rm -f "$CT" >/dev/null 2>&1 || true
 mkdir -p rbnx-build/data
 
+declare -a ZENOH_ARGS=()
+if [[ -n "${ROBONIX_ZENOH_ROUTER:-}" ]]; then
+    ZENOH_ARGS=(-e "ROBONIX_ZENOH_ROUTER=${ROBONIX_ZENOH_ROUTER}")
+fi
+if [[ -n "${ROBONIX_ZENOH_MODE:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_MODE=${ROBONIX_ZENOH_MODE}")
+fi
+if [[ -n "${ROBONIX_ZENOH_LISTEN:-}" ]]; then
+    ZENOH_ARGS+=(-e "ROBONIX_ZENOH_LISTEN=${ROBONIX_ZENOH_LISTEN}")
+fi
+
 # config arrives via Driver(CMD_INIT) over gRPC; the container's bridge
 # binds NAV2_DRIVER_PORT and registers with atlas at ROBONIX_ATLAS.
 exec docker run --rm \
@@ -69,6 +80,8 @@ exec docker run --rm \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-nav2}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
+    -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    "${ZENOH_ARGS[@]}" \
     -e NAV2_DRIVER_PORT="${NAV2_DRIVER_PORT:-50235}" \
     -e NAV2_LOG_LEVEL="${NAV2_LOG_LEVEL:-info}" \
     -v "$(pwd)":/nav2 \

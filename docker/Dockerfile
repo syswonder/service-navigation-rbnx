@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ── TUNA mirrors for domestic (CN) networks ─────────────────────────────
+# ── TUNA mirrors ───────────────────────────────────────────────────
 RUN set -eux; \
     find /etc/apt/sources.list.d/ -maxdepth 1 \( -name '*.list' -o -name '*.sources' \) -print0 \
       | xargs -0 -r sed -i --follow-symlinks \
@@ -42,6 +42,7 @@ RUN apt-get update \
         ros-humble-nav2-bringup \
         ros-humble-tf2-ros \
         ros-humble-pointcloud-to-laserscan \
+        ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
@@ -56,9 +57,8 @@ COPY entrypoint.sh /entrypoint.sh
 COPY no_shm_profile.xml /etc/fastrtps_no_shm.xml
 RUN chmod +x /entrypoint.sh
 
-# Match the sim's RMW + force UDP-only (SHM across containers needs
-# --ipc=host; UDP is the reliable cross-container path).
+# Left for operators who explicitly override RMW back to FastRTPS.
 ENV FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastrtps_no_shm.xml \
-    RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 ENTRYPOINT ["/entrypoint.sh"]
