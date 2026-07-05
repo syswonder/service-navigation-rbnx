@@ -10,7 +10,8 @@
 #
 # --network host + --ipc=host at runtime so DDS/SHM line up with whatever
 # sim/robot container publishes /map, /odom, /scan and consumes /cmd_vel.
-FROM ros:humble-ros-base
+ARG ROS_BASE_IMAGE=robonix-ros:humble-ros-base
+FROM ${ROS_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
