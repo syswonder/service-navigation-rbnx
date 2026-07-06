@@ -115,7 +115,7 @@ To add a target, drop a new `package_manifest.<target>.yaml` whose `build:` /
 
 ```yaml
 - name: nav2
-  url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+  url: https://github.com/syswonder/service-navigation-rbnx
   branch: main
   config:
     params_profile: sim       # sim | slam | default  → config/nav2_params_<profile>.yml
