@@ -36,8 +36,6 @@ package:
   maintainers: [wheatfox <wheatfox17@icloud.com>]
   license: Apache-2.0
 
-capability_id: nav2
-
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
