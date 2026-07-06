@@ -34,6 +34,7 @@ package:
   vendor: robonix
   description: Nav2 service wrapper exposing service/navigation/* over gRPC.
   tags: [service, navigation, nav2, ros2]
+  maintainers: [syswonder]
   license: Apache-2.0
 
 capability_id: nav2
