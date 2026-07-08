@@ -18,6 +18,8 @@ capability_id: nav2
 build: RBNX_BUILD_TARGET=jetson-native bash scripts/build.sh
 start: ROBONIX_NAV2_FORCE=native bash scripts/start.sh
 
+stop: ROBONIX_NAV2_FORCE=native bash scripts/stop.sh
+
 capabilities:
   - name: robonix/service/navigation/driver
   - name: robonix/service/navigation/navigate
