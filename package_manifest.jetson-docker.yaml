@@ -18,7 +18,7 @@ capability_id: nav2
 build: RBNX_BUILD_TARGET=jetson-docker bash scripts/build.sh
 start: ROBONIX_NAV2_FORCE=docker bash scripts/start.sh
 
-stop: docker rm -f robonix_nav2
+stop: ROBONIX_NAV2_FORCE=docker bash scripts/stop.sh
 
 capabilities:
   - name: robonix/service/navigation/driver

@@ -39,7 +39,7 @@ package:
 build: bash scripts/build.sh
 start: bash scripts/start.sh
 
-stop: docker rm -f robonix_nav2
+stop: bash scripts/stop.sh
 
 capabilities:
   - name: robonix/service/navigation/driver
