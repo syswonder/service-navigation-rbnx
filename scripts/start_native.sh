@@ -17,7 +17,7 @@ if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
 fi
 # shellcheck disable=SC1091
 set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
-if ! ros2 pkg list 2>/dev/null | grep -q "^nav2_bringup$"; then
+if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
     echo "[nav2-native] ERR: nav2_bringup not installed on the host." >&2
     echo "[nav2-native]      sudo apt install ros-humble-nav2-bringup ros-humble-navigation2" >&2
     echo "[nav2-native]      (or ROBONIX_NAV2_FORCE=docker)" >&2
