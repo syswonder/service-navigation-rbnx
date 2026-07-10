@@ -57,7 +57,10 @@ case "$TARGET" in
             echo "[nav2/build] ERROR: ros2 not on PATH — source /opt/ros/humble/setup.bash" >&2
             exit 1
         fi
-        if ! ros2 pkg list 2>/dev/null | grep -q "^nav2_bringup$"; then
+        # Avoid `ros2 pkg list | grep -q` under pipefail: grep exits as soon as
+        # it finds a match, ros2 receives SIGPIPE, and the successful lookup is
+        # incorrectly reported as a failed pipeline.
+        if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
             echo "[nav2/build] ERROR: nav2_bringup not installed. On the host run:" >&2
             echo "[nav2/build]   sudo apt install ros-humble-nav2-bringup ros-humble-navigation2" >&2
             exit 1
