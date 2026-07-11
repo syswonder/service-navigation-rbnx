@@ -77,6 +77,11 @@ case "$TARGET" in
             echo "[nav2/build]   sudo apt install ros-humble-pointcloud-to-laserscan" >&2
             exit 1
         fi
+        if ! ros2 pkg prefix rtabmap_util >/dev/null 2>&1; then
+            echo "[nav2/build] ERROR: rtabmap_util not installed. On the host run:" >&2
+            echo "[nav2/build]   sudo apt install ros-humble-rtabmap-util" >&2
+            exit 1
+        fi
         TERMINAL_BUILD="$PKG/rbnx-build/terminal_controller"
         echo "[nav2/build] building replan-persistent terminal plugins"
         colcon --log-base "$TERMINAL_BUILD/log" build \

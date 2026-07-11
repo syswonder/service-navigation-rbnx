@@ -43,6 +43,7 @@ RUN apt-get update \
         ros-humble-nav2-bringup \
         ros-humble-tf2-ros \
         ros-humble-pointcloud-to-laserscan \
+        ros-humble-rtabmap-util \
         ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 

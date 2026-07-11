@@ -51,6 +51,8 @@ config:
   params_file: ""             # absolute/pkg-relative override (wins over profile)
   use_sim_time: false
   action_wait_s: 45.0         # bring-up timeout for navigate_to_pose
+  scan_deskewing: false       # Ranger: timestamped cloud -> odom deskew -> scan
+  odom_frame: odom
   topic_remap: {}             # per-key override, e.g. { map: /my_map }
 ```
 
@@ -78,5 +80,5 @@ spin or backup motion.
 
 - **No mapping / SLAM** — consumes `robonix/service/map/*` from `mapping_rbnx`.
 - **No TF publishing** — the deploy must provide `map→odom→base_link→sensor`.
-- **No pointcloud→laserscan conversion** — if the costmap wants `LaserScan`
-  and you only have a 3D cloud, add a `pointcloud_to_laserscan` adapter.
+- The Ranger profile alone owns PointCloud2 deskewing and LaserScan projection;
+  other profiles must provide the observation type their params file expects.

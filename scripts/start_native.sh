@@ -29,6 +29,11 @@ if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
     echo "[nav2-native]      (or ROBONIX_NAV2_FORCE=docker)" >&2
     exit 2
 fi
+if ! ros2 pkg prefix rtabmap_util >/dev/null 2>&1; then
+    echo "[nav2-native] ERR: rtabmap_util not installed on the host." >&2
+    echo "[nav2-native]      sudo apt install ros-humble-rtabmap-util" >&2
+    exit 2
+fi
 
 export PYTHONPATH="$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 if ROBONIX_PY="$(rbnx path robonix-api 2>/dev/null)"; then

@@ -100,7 +100,7 @@ matching per-target package manifest (`rbnx boot -f … --manifest`):
 
   ```bash
   sudo apt install ros-humble-nav2-bringup ros-humble-navigation2 \
-                   ros-humble-pointcloud-to-laserscan
+                   ros-humble-pointcloud-to-laserscan ros-humble-rtabmap-util
   ```
 
   `scripts/build.sh` verifies the host packages; `scripts/start_native.sh`
@@ -191,9 +191,9 @@ Under `sim`, an online-SLAM provider (rtabmap in the Webots example) supplies
 both `map → odom` and the `/map` the costmaps' static layer consumes.
 
 If your costmap references `/scan` but only `primitive/lidar/lidar3d`
-(PointCloud2) is on atlas, the image ships `pointcloud_to_laserscan` — add it to
-the launch, or switch the costmap layer to `VoxelLayer` with
-`data_type: PointCloud2`.
+(PointCloud2) is on atlas, the Ranger profile owns the adapter. Set
+`scan_deskewing: true` only when the cloud has per-point timestamps; it runs
+RTAB-Map's lidar deskewing against the chassis odom TF before projection.
 
 ## DDS / sysctl tuning (multi-container deploys)
 

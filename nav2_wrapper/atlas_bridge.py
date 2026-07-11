@@ -111,6 +111,7 @@ _cap_id: str = CAP_ID
 _pkg_root: Path = Path(__file__).resolve().parent.parent
 _nav2_proc: subprocess.Popen | None = None
 _scan_projector_proc: subprocess.Popen | None = None
+_scan_deskew_proc: subprocess.Popen | None = None
 _initialized = False
 
 # ROS2 client state (initialized inside Driver.Init after nav2 is alive)
@@ -247,22 +248,24 @@ def _uses_projected_scan(cfg: dict) -> bool:
 
 
 def _kill_scan_projector() -> None:
-    global _scan_projector_proc
-    proc = _scan_projector_proc
+    global _scan_projector_proc, _scan_deskew_proc
+    procs = (_scan_projector_proc, _scan_deskew_proc)
     _scan_projector_proc = None
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
+    _scan_deskew_proc = None
+    for proc in procs:
+        if proc is None or proc.poll() is not None:
+            continue
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            continue
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
@@ -272,7 +275,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
     the standard lidar3d contract, so this package owns a pointcloud-to-scan
     child instead of pushing hardware-specific topic plumbing into the deploy.
     """
-    global _scan_projector_proc
+    global _scan_projector_proc, _scan_deskew_proc
     if not _uses_projected_scan(cfg) or _binding_value(bindings, "scan"):
         return bindings
 
@@ -287,11 +290,42 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
 
     _, footprint_radius = _soma_footprint_info()
     range_min = footprint_radius + float(cfg.get("scan_self_filter_margin_m", 0.05))
+    projector_cloud_topic = cloud_topic
+    if bool(cfg.get("scan_deskewing", False)):
+        projector_cloud_topic = f"{cloud_topic.rstrip('/')}/deskewed"
+        deskew_args = [
+            "ros2", "run", "rtabmap_util", "lidar_deskewing",
+            "--ros-args",
+            "-r", "__node:=robonix_nav_lidar_deskewing",
+            "-r", f"input_cloud:={cloud_topic}",
+            "-p", f"fixed_frame_id:={cfg.get('odom_frame', 'odom')}",
+            "-p", "wait_for_transform:=0.2",
+            "-p", "slerp:=true",
+        ]
+        try:
+            _scan_deskew_proc = subprocess.Popen(
+                deskew_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "scan_deskewing requires ros-humble-rtabmap-util"
+            ) from exc
+        threading.Thread(
+            target=_pump_output,
+            args=(_scan_deskew_proc.stdout, "lidar_deskewing"),
+            daemon=True,
+        ).start()
+        time.sleep(0.25)
+        if _scan_deskew_proc.poll() is not None:
+            _kill_scan_projector()
+            raise RuntimeError("lidar_deskewing exited during startup")
+
     args = [
         "ros2", "run", "pointcloud_to_laserscan", "pointcloud_to_laserscan_node",
         "--ros-args",
         "-r", "__node:=robonix_pointcloud_to_laserscan",
-        "-r", f"cloud_in:={cloud_topic}",
+        "-r", f"cloud_in:={projector_cloud_topic}",
         "-r", "scan:=/scanner/scan",
         "-p", "target_frame:=base_link",
         "-p", "transform_tolerance:=0.15",
@@ -307,6 +341,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
             start_new_session=True,
         )
     except FileNotFoundError as exc:
+        _kill_scan_projector()
         raise RuntimeError(
             "pointcloud_to_laserscan is required for ranger_mini_v3; install "
             "ros-humble-pointcloud-to-laserscan"
@@ -317,10 +352,12 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
     ).start()
     time.sleep(0.25)
     if _scan_projector_proc.poll() is not None:
+        _kill_scan_projector()
         raise RuntimeError("pointcloud_to_laserscan exited during startup")
     log.info(
-        "projecting %s to /scanner/scan for Ranger Nav2 (self-filter range_min=%.3fm)",
-        cloud_topic,
+        "projecting %s to /scanner/scan for Ranger Nav2 (deskew=%s, self-filter range_min=%.3fm)",
+        projector_cloud_topic,
+        bool(cfg.get("scan_deskewing", False)),
         range_min,
     )
     return [*bindings, "scan:=/scanner/scan"]

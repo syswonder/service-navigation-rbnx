@@ -66,6 +66,12 @@ class RangerProfileTest(unittest.TestCase):
         self.assertIn("recoveries=2", detail)
         self.assertIn("Collision Ahead", detail)
 
+    def test_ranger_scan_pipeline_can_deskew_before_projection(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn('"rtabmap_util", "lidar_deskewing"', source)
+        self.assertIn("projector_cloud_topic = f\"{cloud_topic.rstrip('/')}/deskewed\"", source)
+        self.assertIn("fixed_frame_id:=", source)
+
 
 if __name__ == "__main__":
     unittest.main()
