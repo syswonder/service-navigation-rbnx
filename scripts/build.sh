@@ -30,8 +30,15 @@ mkdir -p rbnx-build/data
 if command -v rbnx >/dev/null 2>&1; then
     FLAGS=()
     [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
-    echo "[nav2/build] rbnx codegen --mcp ${FLAGS[*]}"
-    rbnx codegen -p "$PKG" --mcp "${FLAGS[@]}"
+    echo "[nav2/build] rbnx codegen --mcp --ros2 ${FLAGS[*]}"
+    rbnx codegen -p "$PKG" --mcp --ros2 "${FLAGS[@]}"
+
+    set +u
+    source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+    set -u
+    ROS2_IDL="$PKG/rbnx-build/codegen/ros2_idl"
+    echo "[nav2/build] colcon build (Robonix ROS 2 interfaces)"
+    (cd "$ROS2_IDL" && colcon build)
 else
     echo "[nav2/build] WARNING: rbnx not in PATH — skipping proto codegen"
 fi
@@ -63,6 +70,11 @@ case "$TARGET" in
         if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
             echo "[nav2/build] ERROR: nav2_bringup not installed. On the host run:" >&2
             echo "[nav2/build]   sudo apt install ros-humble-nav2-bringup ros-humble-navigation2" >&2
+            exit 1
+        fi
+        if ! ros2 pkg prefix pointcloud_to_laserscan >/dev/null 2>&1; then
+            echo "[nav2/build] ERROR: pointcloud_to_laserscan not installed. On the host run:" >&2
+            echo "[nav2/build]   sudo apt install ros-humble-pointcloud-to-laserscan" >&2
             exit 1
         fi
         echo "[nav2/build] host nav2_bringup OK"

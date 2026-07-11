@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -37,6 +38,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+import grpc
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -70,6 +73,7 @@ _ensure_proto_gen()
 
 import navigation_pb2  # noqa: E402
 import robonix_contracts_pb2_grpc as contracts_grpc  # noqa: E402
+import soma_pb2  # noqa: E402
 from navigation_mcp import (  # noqa: E402
     Navigate_Request as McpNavigateRequest,
     Navigate_Response as McpNavigateResponse,
@@ -98,6 +102,7 @@ _state_lock = threading.Lock()
 _cap_id: str = CAP_ID
 _pkg_root: Path = Path(__file__).resolve().parent.parent
 _nav2_proc: subprocess.Popen | None = None
+_scan_projector_proc: subprocess.Popen | None = None
 _initialized = False
 
 # ROS2 client state (initialized inside Driver.Init after nav2 is alive)
@@ -218,6 +223,100 @@ def _build_remap_args(cfg: dict) -> tuple[list[str], list[str]]:
     return remap_args, missing
 
 
+def _binding_value(bindings: list[str], key: str) -> str:
+    """Return the resolved Atlas endpoint for a named dependency binding."""
+    prefix = f"{key}:="
+    for binding in bindings:
+        if binding.startswith(prefix):
+            return binding[len(prefix):]
+    return ""
+
+
+def _uses_projected_scan(cfg: dict) -> bool:
+    """Whether this profile requires a LaserScan but may only have lidar3d."""
+    return not cfg.get("params_file") and cfg.get("params_profile", "slam") == "ranger_mini_v3"
+
+
+def _kill_scan_projector() -> None:
+    global _scan_projector_proc
+    proc = _scan_projector_proc
+    _scan_projector_proc = None
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
+    """Ensure the Ranger 2D ObstacleLayer has a LaserScan source.
+
+    A native lidar contract wins when available. Ranger Mini otherwise exposes
+    the standard lidar3d contract, so this package owns a pointcloud-to-scan
+    child instead of pushing hardware-specific topic plumbing into the deploy.
+    """
+    global _scan_projector_proc
+    if not _uses_projected_scan(cfg) or _binding_value(bindings, "scan"):
+        return bindings
+
+    cloud_topic = _binding_value(bindings, "scan_cloud")
+    if not cloud_topic:
+        raise RuntimeError(
+            "ranger_mini_v3 requires robonix/primitive/lidar/lidar or "
+            "robonix/primitive/lidar/lidar3d"
+        )
+    if _scan_projector_proc is not None and _scan_projector_proc.poll() is None:
+        return [*bindings, "scan:=/scanner/scan"]
+
+    _, footprint_radius = _soma_footprint_info()
+    range_min = footprint_radius + float(cfg.get("scan_self_filter_margin_m", 0.05))
+    args = [
+        "ros2", "run", "pointcloud_to_laserscan", "pointcloud_to_laserscan_node",
+        "--ros-args",
+        "-r", "__node:=robonix_pointcloud_to_laserscan",
+        "-r", f"cloud_in:={cloud_topic}",
+        "-r", "scan:=/scanner/scan",
+        "-p", "target_frame:=base_link",
+        "-p", "transform_tolerance:=0.15",
+        "-p", "min_height:=0.30",
+        "-p", "max_height:=1.40",
+        "-p", f"range_min:={range_min:.3f}",
+        "-p", "range_max:=12.0",
+        "-p", "use_inf:=true",
+    ]
+    try:
+        _scan_projector_proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "pointcloud_to_laserscan is required for ranger_mini_v3; install "
+            "ros-humble-pointcloud-to-laserscan"
+        ) from exc
+    threading.Thread(
+        target=_pump_output, args=(_scan_projector_proc.stdout, "pointcloud_to_laserscan"),
+        daemon=True,
+    ).start()
+    time.sleep(0.25)
+    if _scan_projector_proc.poll() is not None:
+        raise RuntimeError("pointcloud_to_laserscan exited during startup")
+    log.info(
+        "projecting %s to /scanner/scan for Ranger Nav2 (self-filter range_min=%.3fm)",
+        cloud_topic,
+        range_min,
+    )
+    return [*bindings, "scan:=/scanner/scan"]
+
+
 # ── nav2 subprocess management ───────────────────────────────────────────────
 def _resolve_params_file(cfg: dict) -> str:
     explicit = cfg.get("params_file")
@@ -230,9 +329,10 @@ def _resolve_params_file(cfg: dict) -> str:
         return str(p)
     profile = cfg.get("params_profile", "slam")
     candidates = {
-        "slam":    _pkg_root / "config" / "nav2_params_slam.yml",
-        "sim":     _pkg_root / "config" / "nav2_params_sim.yml",
-        "default": _pkg_root / "config" / "nav2_params.yml",
+        "slam":           _pkg_root / "config" / "nav2_params_slam.yml",
+        "ranger_mini_v3": _pkg_root / "config" / "nav2_params_ranger_mini_v3.yml",
+        "sim":            _pkg_root / "config" / "nav2_params_sim.yml",
+        "default":        _pkg_root / "config" / "nav2_params.yml",
     }
     p = candidates.get(profile)
     if p is None:
@@ -243,9 +343,109 @@ def _resolve_params_file(cfg: dict) -> str:
     return str(p)
 
 
+_footprint_cache: tuple[str, float] | None = None
+
+
+def _soma_footprint_info() -> tuple[str, float]:
+    """Resolve the footprint polygon and circumscribed radius through Soma."""
+    global _footprint_cache
+    if _footprint_cache is not None:
+        return _footprint_cache
+    contract_id = "robonix/system/soma/footprint"
+    records = ATLAS.find_capability(contract_id=contract_id, transport="grpc")
+    if not records:
+        raise RuntimeError(f"required capability unavailable: {contract_id}")
+
+    connection = nav.connect_capability(
+        records[0], contract_id=contract_id, transport="grpc"
+    )
+    endpoint = (connection.endpoint or "").strip()
+    connection.close()
+    if not endpoint:
+        raise RuntimeError(f"{contract_id} resolved to an empty endpoint")
+
+    channel = grpc.insecure_channel(endpoint)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=10)
+        response = contracts_grpc.RobonixSystemSomaFootprintStub(channel).GetFootprint(
+            soma_pb2.GetFootprint_Request(), timeout=10
+        )
+    finally:
+        channel.close()
+
+    if not response.base_frame:
+        raise ValueError("Soma footprint response has no base_frame")
+    if len(response.points) < 3:
+        raise ValueError("Soma footprint requires at least three polygon points")
+    points = []
+    radius = 0.0
+    for point in response.points:
+        if not math.isfinite(point.x) or not math.isfinite(point.y):
+            raise ValueError("Soma footprint contains non-finite point coordinates")
+        points.append(f"[{point.x:.6f}, {point.y:.6f}]")
+        radius = max(radius, math.hypot(point.x, point.y))
+    value = "[ " + ", ".join(points) + " ]"
+    log.info(
+        "resolved Soma footprint base_frame=%s vertices=%d inscribed=%.3fm",
+        response.base_frame,
+        len(response.points),
+        response.inscribed_radius_m,
+    )
+    _footprint_cache = (value, radius)
+    return _footprint_cache
+
+
+def _soma_footprint() -> str:
+    return _soma_footprint_info()[0]
+
+
+def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]:
+    """Fill Atlas topic and Soma body tokens in target-specific profiles."""
+    source = Path(_resolve_params_file(cfg))
+    text = source.read_text(encoding="utf-8")
+    if "__ROBONIX_" not in text:
+        return str(source), bindings
+
+    resolved = {}
+    for item in bindings:
+        key, sep, value = item.partition(":=")
+        if sep:
+            resolved[key] = value
+
+    replacements = {
+        "__ROBONIX_MAP_TOPIC__": resolved.get("map", ""),
+        "__ROBONIX_ODOM_TOPIC__": resolved.get("odom", ""),
+        "__ROBONIX_SCAN_TOPIC__": resolved.get("scan", ""),
+        "__ROBONIX_SCAN_CLOUD_TOPIC__": resolved.get("scan_cloud", ""),
+    }
+    if "__ROBONIX_FOOTPRINT__" in text:
+        replacements["__ROBONIX_FOOTPRINT__"] = _soma_footprint()
+
+    for token, value in replacements.items():
+        if token in text:
+            if not value:
+                raise RuntimeError(f"cannot materialize {source.name}: {token} is unresolved")
+            text = text.replace(token, value)
+
+    unresolved = sorted(set(re.findall(r"__ROBONIX_[A-Z_]+__", text)))
+    if unresolved:
+        raise RuntimeError(
+            f"cannot materialize {source.name}: unresolved tokens {unresolved}"
+        )
+
+    runtime_dir = _pkg_root / "rbnx-build" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    target = runtime_dir / f"nav2_params_{_cap_id}.yaml"
+    target.write_text(text, encoding="utf-8")
+    log.info("materialized nav2 params %s -> %s", source, target)
+    # Target-specific profiles consume Atlas bindings inside the generated
+    # params file. They must not be passed as undeclared launch arguments.
+    return str(target), []
+
+
 def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     global _nav2_proc
-    params_file = _resolve_params_file(cfg)
+    params_file, launch_remaps = _materialize_params(cfg, remap_args)
     use_sim_time = "true" if cfg.get("use_sim_time", False) else "false"
     args = [
         "ros2", "launch", "nav2_bringup", "navigation_launch.py",
@@ -258,8 +458,8 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     # doesn't know about we still pass them — no-op if unused. (Future:
     # rewrite the params YAML with substitutions for nodes that read
     # topic names from params rather than via remap.)
-    args.extend(remap_args)
-    log.info("spawning nav2 (params=%s, remaps=%s)", params_file, remap_args)
+    args.extend(launch_remaps)
+    log.info("spawning nav2 (params=%s, remaps=%s)", params_file, launch_remaps)
     _nav2_proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -269,6 +469,7 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
 
 
 def _kill_nav2() -> None:
+    _kill_scan_projector()
     p = _nav2_proc
     if p is None or p.poll() is not None:
         return
@@ -477,7 +678,7 @@ def init(cfg: dict):
     _USE_SIM_TIME = bool(cfg.get("use_sim_time", False))
 
     try:
-        _spawn_nav2(cfg, remap_args)
+        _spawn_nav2(cfg, _prepare_scan(cfg, remap_args))
     except Exception as e:  # noqa: BLE001
         return Err(f"spawn nav2 failed: {e}")
 

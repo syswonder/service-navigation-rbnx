@@ -17,6 +17,9 @@ if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
 fi
 # shellcheck disable=SC1091
 set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
+if [[ -f "$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash" ]]; then
+    set +u; source "$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash"; set -u
+fi
 if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
     echo "[nav2-native] ERR: nav2_bringup not installed on the host." >&2
     echo "[nav2-native]      sudo apt install ros-humble-nav2-bringup ros-humble-navigation2" >&2
