@@ -1,6 +1,6 @@
-# Ranger Mini v3 is the v0.1 physical-base profile. Only hardware bindings
-# are materialized by Robonix: footprint through Soma and ROS topics through
-# Atlas. All navigation and costmap values intentionally match v0.1.
+# Ranger Mini v3 restores the controller and recovery behavior that was
+# validated on the physical v0.1 deployment. Hardware bindings are still
+# materialized by Robonix: footprint through Soma and ROS topics through Atlas.
 planner_server:
   ros__parameters:
     use_sim_time: false
@@ -34,23 +34,14 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      # RotationShim reads this exact XY tolerance before it begins the final
-      # yaw turn, so this remains the actual approach-pose requirement.
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.15
       stateful: true
     # DWB parameters
     FollowPath:
-      # The shim owns in-place heading changes, including final goal yaw.
-      # DWB remains the primary translational controller and obstacle avoider.
-      plugin: "nav2_rotation_shim_controller::RotationShimController"
-      primary_controller: "dwb_core::DWBLocalPlanner"
-      angular_dist_threshold: 0.785
-      forward_sampling_distance: 0.5
-      rotate_to_heading_angular_vel: 0.6
-      max_angular_accel: 1.0
-      simulate_ahead_time: 1.0
-      rotate_to_goal_heading: true
+      # Keep final-heading control inside DWB. The RotationShim experiment
+      # repeatedly re-entered in-place rotation after wheel-slip changed XY.
+      plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: True
       min_vel_x: 0.00
       min_vel_y: 0.0
@@ -81,9 +72,7 @@ controller_server:
       # trans_stopped_velocity: 0.15
       short_circuit_trajectory_evaluation: True
       stateful: True
-      # RotationShimController owns all in-place turns. Leaving RotateToGoal
-      # enabled here makes DWB compete for final yaw and causes oscillation.
-      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.015
       PathAlign.scale: 1.0
       # PathAlign.forward_point_distance: 0.1
@@ -93,12 +82,18 @@ controller_server:
       # GoalAlign.forward_preference: true
       PathDist.scale: 0.5
       GoalDist.scale: 2.0
+      RotateToGoal.xy_goal_tolerance: 0.20
+      RotateToGoal.yaw_goal_tolerance: 0.20
+      RotateToGoal.scale: 0.6
+      RotateToGoal.slowing_factor: 1.0
+      RotateToGoal.lookahead_time: 0.5
     
 
 bt_navigator:
   ros__parameters:
     use_sim_time: false
-    default_bt_xml_filename: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
+    # Packaged v0.1 tree: one recovery attempt and no physical recovery spin.
+    default_bt_xml_filename: "__ROBONIX_BT_XML__"
     tf_buffer_duration: 0.5
 
 recoveries_server:

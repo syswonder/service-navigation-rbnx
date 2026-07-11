@@ -417,6 +417,9 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
         "__ROBONIX_ODOM_TOPIC__": resolved.get("odom", ""),
         "__ROBONIX_SCAN_TOPIC__": resolved.get("scan", ""),
         "__ROBONIX_SCAN_CLOUD_TOPIC__": resolved.get("scan_cloud", ""),
+        "__ROBONIX_BT_XML__": str(
+            _pkg_root / "config" / "ranger_mini_v3_navigate.xml"
+        ),
     }
     if "__ROBONIX_FOOTPRINT__" in text:
         replacements["__ROBONIX_FOOTPRINT__"] = _soma_footprint()
