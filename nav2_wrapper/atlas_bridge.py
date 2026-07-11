@@ -37,9 +37,12 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 import grpc
+
+from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -53,6 +56,11 @@ def _pump_output(stream, tag: str) -> None:
         line = raw.decode(errors="replace").rstrip()
         if line:
             log.info("[%s] %s", tag, line)
+            if tag == "nav2":
+                diagnostic = classify_nav2_line(line)
+                if diagnostic:
+                    with _state_lock:
+                        _nav_diagnostics.append(diagnostic)
 
 
 def _ensure_proto_gen() -> None:
@@ -115,6 +123,7 @@ _GoalStatus = None
 _nav_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 _goal_states: dict[str, dict] = {}
 _goal_handles: dict[str, object] = {}
+_nav_diagnostics: deque[str] = deque(maxlen=12)
 _last_run_id = ""
 # Whether nav2 (and therefore the TF tree it consumes) runs on /clock sim
 # time. The wrapper's own rclpy node must match: it stamps goal poses with
@@ -616,13 +625,36 @@ def _goal_response_cb(fut, gid: str):
     res_fut.add_done_callback(lambda f: _result_cb(f, gid))
 
 
+def _feedback_cb(message, gid: str) -> None:
+    """Keep progress context because Humble NavigateToPose has an empty result."""
+    feedback = message.feedback
+    pose = feedback.current_pose.pose.position
+    summary = {
+        "distance_remaining": float(feedback.distance_remaining),
+        "recoveries": int(feedback.number_of_recoveries),
+        "x": float(pose.x),
+        "y": float(pose.y),
+    }
+    with _state_lock:
+        state = _goal_states.get(gid)
+        if state is not None:
+            state["feedback"] = summary
+
+
 def _result_cb(fut, gid: str):
     try:
         res = fut.result()
         st_name = _goal_status_name(getattr(res, "status", -1))
         state = _canonical_state(st_name)
         with _state_lock:
-            _goal_states[gid] = {"state": state, "detail": st_name.lower()}
+            previous = _goal_states.get(gid, {})
+            diagnostics = list(_nav_diagnostics) if state == "FAILED" else []
+            _goal_states[gid] = {
+                "state": state,
+                "detail": format_result_detail(
+                    st_name, previous.get("feedback"), diagnostics
+                ),
+            }
             _goal_handles.pop(gid, None)
     except Exception as e:  # noqa: BLE001
         with _state_lock:
@@ -639,7 +671,11 @@ def _dispatch_goal(node, gid: str, payload: dict):
             _goal_states[gid] = {"state": "FAILED",
                                  "detail": "nav action server not ready"}
         return
-    send_future = _nav_action_client.send_goal_async(goal_msg)
+    with _state_lock:
+        _nav_diagnostics.clear()
+    send_future = _nav_action_client.send_goal_async(
+        goal_msg, feedback_callback=lambda msg, g=gid: _feedback_cb(msg, g)
+    )
     send_future.add_done_callback(lambda f, g=gid: _goal_response_cb(f, g))
     with _state_lock:
         _goal_states[gid] = {"state": "RUNNING", "detail": "goal sent"}
