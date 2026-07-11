@@ -253,19 +253,23 @@ def _kill_scan_projector() -> None:
     _scan_projector_proc = None
     _scan_deskew_proc = None
     for proc in procs:
-        if proc is None or proc.poll() is not None:
+        if proc is None:
             continue
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            # ros2 run is a Python parent that spawns the actual ROS binary.
+            # The parent may exit while its child still owns this session's
+            # process group, so target the known PGID directly.
+            os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             continue
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
+        if proc.poll() is None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:

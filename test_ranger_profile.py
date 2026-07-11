@@ -1,3 +1,8 @@
+import ast
+import os
+import signal
+import subprocess
+import time
 import unittest
 import xml.etree.ElementTree as ET
 import importlib.util
@@ -71,6 +76,41 @@ class RangerProfileTest(unittest.TestCase):
         self.assertIn('"rtabmap_util", "lidar_deskewing"', source)
         self.assertIn("projector_cloud_topic = f\"{cloud_topic.rstrip('/')}/deskewed\"", source)
         self.assertIn("fixed_frame_id:=", source)
+        self.assertIn("os.killpg(proc.pid, signal.SIGTERM)", source)
+
+    def test_scan_cleanup_kills_child_after_ros2_parent_exits(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        tree = ast.parse(source)
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_kill_scan_projector"
+        )
+        namespace = {
+            "os": os,
+            "signal": signal,
+            "subprocess": subprocess,
+            "_scan_projector_proc": None,
+            "_scan_deskew_proc": None,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "cleanup", "exec"), namespace)
+
+        parent = subprocess.Popen(
+            ["bash", "-c", "sleep 30 &"], start_new_session=True
+        )
+        parent.wait(timeout=2.0)
+        namespace["_scan_projector_proc"] = parent
+        namespace["_kill_scan_projector"]()
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(parent.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.killpg(parent.pid, signal.SIGKILL)
+            self.fail("scan child process group survived cleanup")
 
 
 if __name__ == "__main__":
