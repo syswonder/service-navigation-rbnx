@@ -61,6 +61,13 @@ config:
 | `slam` *(default)* | `config/nav2_params_slam.yml` | map frame from external SLAM (mapping_rbnx); no map_server |
 | `sim` | `config/nav2_params_sim.yml` | webots-tuned (TB3-like limits) |
 | `default` | `config/nav2_params.yml` | static-map deploys |
+| `ranger_mini_v3` | `config/nav2_params_ranger_mini_v3.yml` | Ranger Mini with bounded terminal rotation |
+
+The Ranger profile uses a goal checker and DWB critic whose terminal latch
+survives same-goal replanning. After entering the terminal XY window it forbids
+translation, caps yaw speed, and aborts on excessive XY drift, elapsed time,
+rotation, or lack of yaw progress. Its behavior tree never commands recovery
+spin or backup motion.
 
 > The robot footprint, velocity/accel limits, and frames currently live in
 > these YAML files (Ranger-Mini / TB3 values). A different body must supply its

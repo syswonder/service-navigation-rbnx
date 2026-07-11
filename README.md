@@ -80,7 +80,7 @@ owns `map→odom` (rtabmap in the Webots example); no AMCL or pre-built map.
 ## Deployment targets
 
 Nav2 itself is large and the upstream `apt` packages build cleanly on Humble, so
-this package vendors only the YAML params in `config/`. Three targets cover the
+this package vendors YAML plus one small Ranger terminal plugin. Three targets cover the
 common deployments; the target is selected by `RBNX_BUILD_TARGET` (build) and the
 matching per-target package manifest (`rbnx boot -f … --manifest`):
 
@@ -136,6 +136,18 @@ an operator's tuning lives outside the package.
 | `sim`     | `map` (static layer) | online SLAM (rtabmap) | Webots / any body with a SLAM provider publishing `/map` + `map→odom`, mapping while navigating |
 | `slam`    | `map`                | AMCL + map        | Real deploy with a SLAM `map→odom` TF + static map |
 | `default` | `map`                | AMCL + map        | Generic map-based navigation                       |
+| `ranger_mini_v3` | `map`          | external SLAM     | Ranger Mini v3 with bounded, replan-persistent terminal rotation |
+
+The Ranger profile keeps DWB for path tracking but replaces Humble's stock
+terminal state. `ControllerServer` resets the goal checker and DWB critics each
+time a replanned path arrives; at 5 Hz this clears the normal `RotateToGoal`
+XY latch and can re-enable translation after skid-steer rotation drifts XY.
+`PersistentGoalChecker` and `PersistentRotateToGoalCritic` reset only when the
+actual goal changes. Once the robot enters 0.30 m, translation stays disabled;
+0.45 m XY drift, 15 seconds, three seconds without yaw progress, or excessive
+cumulative rotation stops the controller with an actionable failure. Terminal
+angular velocity is capped at 0.30 rad/s. The Ranger recovery tree has no spin
+or backup motion.
 
 ## Atlas contract dependencies
 
@@ -218,6 +230,7 @@ nav2_wrapper_rbnx/
 │   ├── build.sh                           codegen + per-target build (RBNX_BUILD_TARGET)
 │   ├── start.sh                           docker ↔ native dispatch
 │   └── start_native.sh                    host ROS2 path
+├── terminal_controller/                   persistent goal checker + DWB critic
 ├── docker/
 │   ├── Dockerfile                         ROS2 Humble + Nav2 + pointcloud_to_laserscan
 │   ├── entrypoint.sh

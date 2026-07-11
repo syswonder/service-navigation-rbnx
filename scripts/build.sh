@@ -77,6 +77,12 @@ case "$TARGET" in
             echo "[nav2/build]   sudo apt install ros-humble-pointcloud-to-laserscan" >&2
             exit 1
         fi
+        TERMINAL_BUILD="$PKG/rbnx-build/terminal_controller"
+        echo "[nav2/build] building replan-persistent terminal plugins"
+        colcon --log-base "$TERMINAL_BUILD/log" build \
+            --base-paths "$PKG/terminal_controller" \
+            --build-base "$TERMINAL_BUILD/build" \
+            --install-base "$TERMINAL_BUILD/install"
         echo "[nav2/build] host nav2_bringup OK"
         ;;
     *)

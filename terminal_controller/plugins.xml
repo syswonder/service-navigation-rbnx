@@ -1,0 +1,12 @@
+<library path="robonix_nav2_terminal">
+  <class name="robonix_nav2_terminal::PersistentGoalChecker"
+         type="robonix_nav2_terminal::PersistentGoalChecker"
+         base_class_type="nav2_core::GoalChecker">
+    <description>XY/yaw latch that survives same-goal replanning.</description>
+  </class>
+  <class name="robonix_nav2_terminal::PersistentRotateToGoalCritic"
+         type="robonix_nav2_terminal::PersistentRotateToGoalCritic"
+         base_class_type="dwb_core::TrajectoryCritic">
+    <description>Bounded pure rotation after entering the terminal XY window.</description>
+  </class>
+</library>
