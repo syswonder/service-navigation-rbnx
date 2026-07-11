@@ -149,6 +149,12 @@ cumulative rotation stops the controller with an actionable failure. Terminal
 angular velocity is capped at 0.30 rad/s. The Ranger recovery tree has no spin
 or backup motion.
 
+Daytime acceptance uses `scripts/ranger_acceptance.py PLAN.yaml`. It is a dry
+run by default; sending goals requires both `--execute` and
+`--i-understand-robot-will-move`. Each goal is sent once with no automatic
+retry. The JSON report records terminal XY drift, accumulated rotation,
+commands, stopped velocity, duration, and the Nav2 action result.
+
 ## Atlas contract dependencies
 
 The wrapper resolves every topic it consumes through atlas
