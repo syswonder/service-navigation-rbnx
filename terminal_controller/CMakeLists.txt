@@ -43,7 +43,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_persistent_goal_checker test/test_persistent_goal_checker.cpp)
   target_link_libraries(test_persistent_goal_checker ${PROJECT_NAME})
   ament_target_dependencies(test_persistent_goal_checker
-    geometry_msgs nav2_core rclcpp rclcpp_lifecycle tf2)
+    dwb_core geometry_msgs nav2_core pluginlib rclcpp rclcpp_lifecycle tf2)
 endif()
 
 ament_export_include_directories(include)

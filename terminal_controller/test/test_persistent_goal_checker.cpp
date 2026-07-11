@@ -6,6 +6,9 @@
 #include "robonix_nav2_terminal/persistent_goal_checker.hpp"
 #include "robonix_nav2_terminal/persistent_rotate_to_goal_critic.hpp"
 #include "dwb_core/exceptions.hpp"
+#include "dwb_core/trajectory_critic.hpp"
+#include "nav2_core/goal_checker.hpp"
+#include "pluginlib/class_loader.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
@@ -73,6 +76,19 @@ TEST(PersistentRotateToGoalCritic, ReplanDoesNotReenableTranslation)
   EXPECT_THROW(
     critic.scoreTrajectory(translating),
     dwb_core::IllegalTrajectoryException);
+}
+
+TEST(PluginRegistration, LoadsBothTerminalPlugins)
+{
+  pluginlib::ClassLoader<nav2_core::GoalChecker> goal_loader(
+    "nav2_core", "nav2_core::GoalChecker");
+  EXPECT_NO_THROW(goal_loader.createSharedInstance(
+      "robonix_nav2_terminal::PersistentGoalChecker"));
+
+  pluginlib::ClassLoader<dwb_core::TrajectoryCritic> critic_loader(
+    "dwb_core", "dwb_core::TrajectoryCritic");
+  EXPECT_NO_THROW(critic_loader.createSharedInstance(
+      "robonix_nav2_terminal::PersistentRotateToGoalCritic"));
 }
 
 }  // namespace
