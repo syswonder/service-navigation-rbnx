@@ -41,18 +41,49 @@ class RangerProfileTest(unittest.TestCase):
         )
 
     def test_packaged_recovery_tree_does_not_command_a_spin(self):
-        configured = self.params["bt_navigator"]["ros__parameters"][
-            "default_bt_xml_filename"
-        ]
-        self.assertEqual(configured, "__ROBONIX_BT_XML__")
+        navigator = self.params["bt_navigator"]["ros__parameters"]
+        self.assertEqual(navigator["default_bt_xml_filename"], "__ROBONIX_BT_XML__")
+        self.assertEqual(
+            navigator["default_nav_to_pose_bt_xml"], "__ROBONIX_BT_XML__"
+        )
         tree = ET.parse(ROOT / "config" / "ranger_mini_v3_navigate.xml")
         root_recovery = tree.find(".//BehaviorTree/RecoveryNode")
         self.assertEqual(root_recovery.attrib["number_of_retries"], "1")
         rate = tree.find(".//RateController")
         self.assertEqual(rate.attrib["hz"], "5.0")
-        spin = tree.find(".//Spin")
-        self.assertEqual(spin.attrib["spin_dist"], "0.0")
+        self.assertIsNone(tree.find(".//Spin"))
         self.assertIsNone(tree.find(".//BackUp"))
+        follow_path = tree.find(".//FollowPath")
+        self.assertIsNotNone(follow_path)
+        self.assertNotIn("path_topic", follow_path.attrib)
+
+    def test_late_first_goal_status_does_not_reset_same_goal(self):
+        goal_checker = (
+            ROOT / "terminal_controller" / "src" / "persistent_goal_checker.cpp"
+        ).read_text()
+        critic = (
+            ROOT
+            / "terminal_controller"
+            / "src"
+            / "persistent_rotate_to_goal_critic.cpp"
+        ).read_text()
+        for source, geometry_check in (
+            (goal_checker, "goalChanged(goal_pose)"),
+            (critic, "goalChanged(goal)"),
+        ):
+            self.assertIn("seen_goal_epoch_ != 0", source)
+            self.assertIn("if (epoch != 0)", source)
+            self.assertIn(geometry_check, source)
+
+    def test_yaw_latch_brakes_instead_of_rejecting_every_nonzero_sample(self):
+        critic = (
+            ROOT
+            / "terminal_controller"
+            / "src"
+            / "persistent_rotate_to_goal_critic.cpp"
+        ).read_text()
+        self.assertNotIn("nonzero command after terminal yaw latch", critic)
+        self.assertIn("angular_speed * angular_speed", critic)
 
     def test_humble_abort_detail_keeps_feedback_and_root_signal(self):
         path = ROOT / "nav2_wrapper" / "diagnostics.py"

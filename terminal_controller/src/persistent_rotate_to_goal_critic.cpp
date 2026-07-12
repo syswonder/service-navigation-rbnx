@@ -10,25 +10,24 @@
 #include "nav_2d_utils/parameters.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
-namespace robonix_nav2_terminal
-{
+namespace robonix_nav2_terminal {
 
-void PersistentRotateToGoalCritic::onInit()
-{
+void PersistentRotateToGoalCritic::onInit() {
   auto node = node_.lock();
   if (!node) {
     throw std::runtime_error("PersistentRotateToGoalCritic cannot lock node");
   }
   clock_ = node->get_clock();
-  goal_status_sub_ = node->create_subscription<action_msgs::msg::GoalStatusArray>(
-    "/navigate_to_pose/_action/status", rclcpp::QoS(10),
-    [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
-      goal_epoch_.observe(*msg);
-    });
+  goal_status_sub_ =
+      node->create_subscription<action_msgs::msg::GoalStatusArray>(
+          "/navigate_to_pose/_action/status", rclcpp::QoS(10),
+          [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
+            goal_epoch_.observe(*msg);
+          });
   const std::string prefix = dwb_plugin_name_ + "." + name_ + ".";
-  const auto get = [&node, &prefix](const char * key, double value) {
-      return nav_2d_utils::searchAndGetParam(node, prefix + key, value);
-    };
+  const auto get = [&node, &prefix](const char *key, double value) {
+    return nav_2d_utils::searchAndGetParam(node, prefix + key, value);
+  };
   xy_enter_ = get("xy_enter_tolerance", xy_enter_);
   xy_exit_ = get("xy_exit_tolerance", xy_exit_);
   yaw_tolerance_ = get("yaw_enter_tolerance", yaw_tolerance_);
@@ -36,8 +35,8 @@ void PersistentRotateToGoalCritic::onInit()
   const double stopped_xy = get("stopped_linear_velocity", 0.05);
   stopped_xy_speed_sq_ = stopped_xy * stopped_xy;
   slowing_factor_ = get("slowing_factor", slowing_factor_);
-  max_terminal_angular_velocity_ = get(
-    "max_terminal_angular_velocity", max_terminal_angular_velocity_);
+  max_terminal_angular_velocity_ =
+      get("max_terminal_angular_velocity", max_terminal_angular_velocity_);
   lookahead_time_ = get("lookahead_time", lookahead_time_);
   max_terminal_duration_ = get("max_terminal_duration", max_terminal_duration_);
   no_progress_timeout_ = get("no_progress_timeout", no_progress_timeout_);
@@ -46,32 +45,30 @@ void PersistentRotateToGoalCritic::onInit()
   goal_change_xy_ = get("goal_change_xy", goal_change_xy_);
   goal_change_yaw_ = get("goal_change_yaw", goal_change_yaw_);
   if (!(xy_enter_ > 0.0 && xy_exit_ >= xy_enter_ && yaw_tolerance_ > 0.0 &&
-    yaw_exit_ >= yaw_tolerance_ && max_terminal_duration_ > 0.0 &&
-    no_progress_timeout_ > 0.0 && max_terminal_angular_velocity_ > 0.0))
-  {
-    throw std::runtime_error("PersistentRotateToGoalCritic parameters are invalid");
+        yaw_exit_ >= yaw_tolerance_ && max_terminal_duration_ > 0.0 &&
+        no_progress_timeout_ > 0.0 && max_terminal_angular_velocity_ > 0.0)) {
+    throw std::runtime_error(
+        "PersistentRotateToGoalCritic parameters are invalid");
   }
 }
 
-void PersistentRotateToGoalCritic::reset()
-{
+void PersistentRotateToGoalCritic::reset() {
   // DWB calls reset on every global replan. prepare() owns reset semantics and
   // only clears terminal state when the final goal actually changes.
 }
 
 bool PersistentRotateToGoalCritic::goalChanged(
-  const geometry_msgs::msg::Pose2D & goal) const
-{
+    const geometry_msgs::msg::Pose2D &goal) const {
   if (!have_goal_) {
     return true;
   }
   return std::hypot(goal.x - goal_.x, goal.y - goal_.y) > goal_change_xy_ ||
          std::abs(angles::shortest_angular_distance(goal_.theta, goal.theta)) >
-         goal_change_yaw_;
+             goal_change_yaw_;
 }
 
-void PersistentRotateToGoalCritic::startGoal(const geometry_msgs::msg::Pose2D & goal)
-{
+void PersistentRotateToGoalCritic::startGoal(
+    const geometry_msgs::msg::Pose2D &goal) {
   goal_ = goal;
   have_goal_ = true;
   in_window_ = false;
@@ -82,28 +79,34 @@ void PersistentRotateToGoalCritic::startGoal(const geometry_msgs::msg::Pose2D & 
   allowed_rotation_ = 0.0;
 }
 
-[[noreturn]] void PersistentRotateToGoalCritic::reject(const std::string & reason) const
-{
+[[noreturn]] void
+PersistentRotateToGoalCritic::reject(const std::string &reason) const {
   throw dwb_core::IllegalTrajectoryException(name_, reason);
 }
 
 bool PersistentRotateToGoalCritic::prepare(
-  const geometry_msgs::msg::Pose2D & pose,
-  const nav_2d_msgs::msg::Twist2D & velocity,
-  const geometry_msgs::msg::Pose2D & goal,
-  const nav_2d_msgs::msg::Path2D &)
-{
+    const geometry_msgs::msg::Pose2D &pose,
+    const nav_2d_msgs::msg::Twist2D &velocity,
+    const geometry_msgs::msg::Pose2D &goal, const nav_2d_msgs::msg::Path2D &) {
   const auto epoch = goal_epoch_.value();
-  if ((epoch != 0 && epoch != seen_goal_epoch_) ||
-    (epoch == 0 && goalChanged(goal)))
-  {
+  // Always retain the geometric fallback. During goal preemption the action
+  // status subscription may be one executor tick behind the new DWB path;
+  // carrying the old terminal latch into that path falsely rejects every
+  // trajectory as terminal drift.
+  const bool new_status_goal =
+      epoch != 0 && seen_goal_epoch_ != 0 && epoch != seen_goal_epoch_;
+  if (new_status_goal || goalChanged(goal)) {
     startGoal(goal);
+  }
+  // The first status callback can arrive after the terminal window is already
+  // latched. Adopt it without treating the same geometric goal as preemption.
+  if (epoch != 0) {
     seen_goal_epoch_ = epoch;
   }
   const auto now = clock_->now();
   const double distance = std::hypot(pose.x - goal.x, pose.y - goal.y);
-  const double yaw_error = std::abs(
-    angles::shortest_angular_distance(pose.theta, goal.theta));
+  const double yaw_error =
+      std::abs(angles::shortest_angular_distance(pose.theta, goal.theta));
 
   if (!in_window_ && distance <= xy_enter_) {
     in_window_ = true;
@@ -124,8 +127,8 @@ bool PersistentRotateToGoalCritic::prepare(
     reject("terminal rotation time limit exceeded");
   }
   if (have_last_yaw_) {
-    accumulated_rotation_ += std::abs(
-      angles::shortest_angular_distance(last_yaw_, pose.theta));
+    accumulated_rotation_ +=
+        std::abs(angles::shortest_angular_distance(last_yaw_, pose.theta));
   }
   last_yaw_ = pose.theta;
   have_last_yaw_ = true;
@@ -136,8 +139,7 @@ bool PersistentRotateToGoalCritic::prepare(
     best_yaw_error_ = yaw_error;
     last_progress_at_ = now;
   } else if (!yaw_reached_ &&
-    (now - last_progress_at_).seconds() > no_progress_timeout_)
-  {
+             (now - last_progress_at_).seconds() > no_progress_timeout_) {
     reject("terminal yaw made no progress");
   }
   if (!yaw_reached_ && yaw_error <= yaw_tolerance_) {
@@ -154,19 +156,23 @@ bool PersistentRotateToGoalCritic::prepare(
 }
 
 double PersistentRotateToGoalCritic::scoreTrajectory(
-  const dwb_msgs::msg::Trajectory2D & trajectory)
-{
+    const dwb_msgs::msg::Trajectory2D &trajectory) {
   if (!in_window_) {
     return 0.0;
   }
-  const double linear_speed_sq =
-    trajectory.velocity.x * trajectory.velocity.x +
-    trajectory.velocity.y * trajectory.velocity.y;
+  const double linear_speed_sq = trajectory.velocity.x * trajectory.velocity.x +
+                                 trajectory.velocity.y * trajectory.velocity.y;
   if (yaw_reached_) {
-    if (linear_speed_sq > 0.0 || std::abs(trajectory.velocity.theta) > 0.0) {
-      reject("nonzero command after terminal yaw latch");
+    if (linear_speed_sq > 0.0) {
+      reject("translation forbidden after terminal yaw latch");
     }
-    return 0.0;
+    // A critic cannot publish a zero Twist. Rejecting every dynamically
+    // reachable nonzero sample makes DWB throw, so the controller aborts before
+    // odometry reaches the goal checker's stopped threshold. Keep rotation
+    // samples legal and score speed directly; DWB then selects the slowest
+    // reachable command each tick until its zero sample becomes reachable.
+    const double angular_speed = std::abs(trajectory.velocity.theta);
+    return slowing_factor_ * angular_speed * angular_speed;
   }
   if (std::abs(trajectory.velocity.theta) > max_terminal_angular_velocity_) {
     reject("terminal angular velocity exceeds configured limit");
@@ -185,13 +191,12 @@ double PersistentRotateToGoalCritic::scoreTrajectory(
   if (lookahead_time_ >= 0.0) {
     end_yaw = dwb_core::projectPose(trajectory, lookahead_time_).theta;
   }
-  const double rotation_score = std::abs(
-    angles::shortest_angular_distance(end_yaw, goal_yaw_));
+  const double rotation_score =
+      std::abs(angles::shortest_angular_distance(end_yaw, goal_yaw_));
   return linear_speed_sq * slowing_factor_ + rotation_score;
 }
 
-}  // namespace robonix_nav2_terminal
+} // namespace robonix_nav2_terminal
 
-PLUGINLIB_EXPORT_CLASS(
-  robonix_nav2_terminal::PersistentRotateToGoalCritic,
-  dwb_core::TrajectoryCritic)
+PLUGINLIB_EXPORT_CLASS(robonix_nav2_terminal::PersistentRotateToGoalCritic,
+                       dwb_core::TrajectoryCritic)

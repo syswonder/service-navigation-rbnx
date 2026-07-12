@@ -107,7 +107,11 @@ bt_navigator:
   ros__parameters:
     use_sim_time: false
     # Packaged v0.1 tree: one recovery attempt and no physical recovery spin.
+    # Humble reads default_nav_to_pose_bt_xml. Keep the legacy key too for
+    # compatibility with older Nav2 releases, but both must select the same
+    # non-physical recovery tree.
     default_bt_xml_filename: "__ROBONIX_BT_XML__"
+    default_nav_to_pose_bt_xml: "__ROBONIX_BT_XML__"
     tf_buffer_duration: 0.5
 
 recoveries_server:
