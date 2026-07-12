@@ -1,0 +1,7 @@
+<library path="robonix_nav2_goal_checker">
+  <class name="robonix_nav2_terminal::PersistentGoalChecker"
+         type="robonix_nav2_terminal::PersistentGoalChecker"
+         base_class_type="nav2_core::GoalChecker">
+    <description>XY/yaw latch that survives same-goal replanning.</description>
+  </class>
+</library>

@@ -7,6 +7,7 @@
 #include "robonix_nav2_terminal/persistent_rotate_to_goal_critic.hpp"
 #include "dwb_core/exceptions.hpp"
 #include "dwb_core/trajectory_critic.hpp"
+#include "nav2_core/controller.hpp"
 #include "nav2_core/goal_checker.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "tf2/LinearMath/Quaternion.h"
@@ -89,6 +90,14 @@ TEST(PluginRegistration, LoadsBothTerminalPlugins)
     "dwb_core", "dwb_core::TrajectoryCritic");
   EXPECT_NO_THROW(critic_loader.createSharedInstance(
       "robonix_nav2_terminal::PersistentRotateToGoalCritic"));
+}
+
+TEST(PluginRegistration, LoadsSystemDwbControllerAlongsideTerminalOverlay)
+{
+  pluginlib::ClassLoader<nav2_core::Controller> controller_loader(
+    "nav2_core", "nav2_core::Controller");
+  EXPECT_NO_THROW(controller_loader.createSharedInstance(
+      "dwb_core::DWBLocalPlanner"));
 }
 
 }  // namespace
