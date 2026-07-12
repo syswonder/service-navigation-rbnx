@@ -28,17 +28,20 @@ mkdir -p rbnx-build/data
 
 # ── 1. Codegen (atlas + IDL stubs) — every target ───────────────────────────
 if command -v rbnx >/dev/null 2>&1; then
-    FLAGS=()
+    FLAGS=(--mcp)
+    [[ "$TARGET" == "jetson-native" ]] && FLAGS+=(--ros2)
     [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
-    echo "[nav2/build] rbnx codegen --mcp --ros2 ${FLAGS[*]}"
-    rbnx codegen -p "$PKG" --mcp --ros2 "${FLAGS[@]}"
+    echo "[nav2/build] rbnx codegen ${FLAGS[*]}"
+    rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-    set +u
-    source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
-    set -u
-    ROS2_IDL="$PKG/rbnx-build/codegen/ros2_idl"
-    echo "[nav2/build] colcon build (Robonix ROS 2 interfaces)"
-    (cd "$ROS2_IDL" && colcon build)
+    if [[ "$TARGET" == "jetson-native" ]]; then
+        set +u
+        source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+        set -u
+        ROS2_IDL="$PKG/rbnx-build/codegen/ros2_idl"
+        echo "[nav2/build] colcon build (Robonix ROS 2 interfaces)"
+        (cd "$ROS2_IDL" && colcon build)
+    fi
 else
     echo "[nav2/build] WARNING: rbnx not in PATH — skipping proto codegen"
 fi
