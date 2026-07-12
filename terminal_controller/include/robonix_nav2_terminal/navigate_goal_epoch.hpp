@@ -12,6 +12,21 @@
 
 namespace robonix_nav2_terminal {
 
+inline bool shouldStartGoal(bool have_goal, uint64_t observed_epoch,
+                            uint64_t seen_epoch, bool geometry_changed) {
+  if (!have_goal) {
+    return true;
+  }
+  // Once an action UUID has been observed, it is the stable goal identity.
+  // ControllerServer supplies the goal in the local costmap frame, so
+  // map->odom localization corrections can move that pose while the actual
+  // NavigateToPose goal remains unchanged.
+  if (observed_epoch != 0) {
+    return seen_epoch != 0 && observed_epoch != seen_epoch;
+  }
+  return geometry_changed;
+}
+
 class NavigateGoalEpoch {
 public:
   void observe(const action_msgs::msg::GoalStatusArray &statuses) {

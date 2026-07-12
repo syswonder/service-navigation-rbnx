@@ -88,12 +88,11 @@ bool PersistentGoalChecker::isGoalReached(
     const geometry_msgs::msg::Pose &goal_pose,
     const geometry_msgs::msg::Twist &velocity) {
   const auto epoch = goal_epoch_.value();
-  // Action status is an additional reset signal, not the sole source of
-  // truth. Status delivery can lag or be reordered during preemption, while
-  // ControllerServer already gives us the actual final pose for this path.
-  const bool new_status_goal =
-      epoch != 0 && seen_goal_epoch_ != 0 && epoch != seen_goal_epoch_;
-  if (new_status_goal || goalChanged(goal_pose)) {
+  // The action UUID is authoritative after its first status arrives. The goal
+  // pose is expressed in the controller's local frame and therefore shifts
+  // during map->odom localization corrections even for the same action.
+  if (shouldStartGoal(have_goal_, epoch, seen_goal_epoch_,
+                      goalChanged(goal_pose))) {
     startGoal(goal_pose);
   }
   // The first status callback can arrive well after control starts. Adopt its

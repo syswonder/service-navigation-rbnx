@@ -89,13 +89,10 @@ bool PersistentRotateToGoalCritic::prepare(
     const nav_2d_msgs::msg::Twist2D &velocity,
     const geometry_msgs::msg::Pose2D &goal, const nav_2d_msgs::msg::Path2D &) {
   const auto epoch = goal_epoch_.value();
-  // Always retain the geometric fallback. During goal preemption the action
-  // status subscription may be one executor tick behind the new DWB path;
-  // carrying the old terminal latch into that path falsely rejects every
-  // trajectory as terminal drift.
-  const bool new_status_goal =
-      epoch != 0 && seen_goal_epoch_ != 0 && epoch != seen_goal_epoch_;
-  if (new_status_goal || goalChanged(goal)) {
+  // The action UUID is authoritative after its first status arrives. The goal
+  // pose is expressed in the controller's local frame and therefore shifts
+  // during map->odom localization corrections even for the same action.
+  if (shouldStartGoal(have_goal_, epoch, seen_goal_epoch_, goalChanged(goal))) {
     startGoal(goal);
   }
   // The first status callback can arrive after the terminal window is already
@@ -152,6 +149,7 @@ bool PersistentRotateToGoalCritic::prepare(
   current_xy_speed_sq_ = velocity.x * velocity.x + velocity.y * velocity.y;
   rotating_ = rotating_ || current_xy_speed_sq_ <= stopped_xy_speed_sq_;
   goal_yaw_ = goal.theta;
+  current_yaw_ = pose.theta;
   return true;
 }
 
@@ -176,6 +174,12 @@ double PersistentRotateToGoalCritic::scoreTrajectory(
   }
   if (std::abs(trajectory.velocity.theta) > max_terminal_angular_velocity_) {
     reject("terminal angular velocity exceeds configured limit");
+  }
+  const double signed_yaw_error =
+      angles::shortest_angular_distance(current_yaw_, goal_yaw_);
+  if (std::abs(signed_yaw_error) > yaw_tolerance_ &&
+      trajectory.velocity.theta * signed_yaw_error < 0.0) {
+    reject("terminal angular velocity points away from goal yaw");
   }
   if (!rotating_) {
     if (linear_speed_sq >= current_xy_speed_sq_) {

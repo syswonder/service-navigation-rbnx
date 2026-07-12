@@ -2,37 +2,36 @@
 
 #include <string>
 
+#include "action_msgs/msg/goal_status_array.hpp"
 #include "dwb_core/trajectory_critic.hpp"
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "nav_2d_msgs/msg/path2_d.hpp"
 #include "nav_2d_msgs/msg/twist2_d.hpp"
 #include "rclcpp/clock.hpp"
 #include "rclcpp/time.hpp"
-#include "action_msgs/msg/goal_status_array.hpp"
 #include "robonix_nav2_terminal/navigate_goal_epoch.hpp"
 
-namespace robonix_nav2_terminal
-{
+namespace robonix_nav2_terminal {
 
-class PersistentRotateToGoalCritic : public dwb_core::TrajectoryCritic
-{
+class PersistentRotateToGoalCritic : public dwb_core::TrajectoryCritic {
 public:
   void onInit() override;
   void reset() override;
-  bool prepare(
-    const geometry_msgs::msg::Pose2D & pose,
-    const nav_2d_msgs::msg::Twist2D & velocity,
-    const geometry_msgs::msg::Pose2D & goal,
-    const nav_2d_msgs::msg::Path2D & global_plan) override;
-  double scoreTrajectory(const dwb_msgs::msg::Trajectory2D & trajectory) override;
+  bool prepare(const geometry_msgs::msg::Pose2D &pose,
+               const nav_2d_msgs::msg::Twist2D &velocity,
+               const geometry_msgs::msg::Pose2D &goal,
+               const nav_2d_msgs::msg::Path2D &global_plan) override;
+  double
+  scoreTrajectory(const dwb_msgs::msg::Trajectory2D &trajectory) override;
 
 private:
-  void startGoal(const geometry_msgs::msg::Pose2D & goal);
-  bool goalChanged(const geometry_msgs::msg::Pose2D & goal) const;
-  [[noreturn]] void reject(const std::string & reason) const;
+  void startGoal(const geometry_msgs::msg::Pose2D &goal);
+  bool goalChanged(const geometry_msgs::msg::Pose2D &goal) const;
+  [[noreturn]] void reject(const std::string &reason) const;
 
   rclcpp::Clock::SharedPtr clock_;
-  rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr goal_status_sub_;
+  rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr
+      goal_status_sub_;
   NavigateGoalEpoch goal_epoch_;
   uint64_t seen_goal_epoch_{0};
   geometry_msgs::msg::Pose2D goal_;
@@ -45,6 +44,7 @@ private:
   double accumulated_rotation_{0.0};
   double allowed_rotation_{0.0};
   double goal_yaw_{0.0};
+  double current_yaw_{0.0};
   double current_xy_speed_sq_{0.0};
   double stopped_xy_speed_sq_{0.0};
   double xy_enter_{0.30};
@@ -65,4 +65,4 @@ private:
   rclcpp::Time last_progress_at_{0, 0, RCL_ROS_TIME};
 };
 
-}  // namespace robonix_nav2_terminal
+} // namespace robonix_nav2_terminal

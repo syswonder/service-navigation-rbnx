@@ -106,6 +106,11 @@ controller_server:
 bt_navigator:
   ros__parameters:
     use_sim_time: false
+    # The Ranger controller/planner run at 5 Hz. A 100 Hz BT loop repeatedly
+    # starved action acknowledgement callbacks on Jetson; 20 Hz keeps steering
+    # responsive without manufacturing server timeouts under SLAM load.
+    bt_loop_duration: 50
+    default_server_timeout: 1000
     # Packaged v0.1 tree: one recovery attempt and no physical recovery spin.
     # Humble reads default_nav_to_pose_bt_xml. Keep the legacy key too for
     # compatibility with older Nav2 releases, but both must select the same

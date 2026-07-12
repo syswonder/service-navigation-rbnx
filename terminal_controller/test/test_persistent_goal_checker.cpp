@@ -53,6 +53,18 @@ TEST(NavigateGoalEpoch, NewestActiveGoalWinsRegardlessOfArrayOrder) {
   EXPECT_EQ(epoch.value(), 1u);
 }
 
+TEST(NavigateGoalIdentity, SameUuidIgnoresLocalFrameGoalMotion) {
+  using robonix_nav2_terminal::shouldStartGoal;
+  EXPECT_TRUE(shouldStartGoal(false, 0, 0, false));
+  EXPECT_TRUE(shouldStartGoal(true, 0, 0, true));
+
+  // Adopt the first action status without resetting an already-started goal.
+  EXPECT_FALSE(shouldStartGoal(true, 1, 0, true));
+  // RTAB-Map map->odom corrections must not reset a stable action UUID.
+  EXPECT_FALSE(shouldStartGoal(true, 1, 1, true));
+  EXPECT_TRUE(shouldStartGoal(true, 2, 1, false));
+}
+
 TEST(PersistentGoalChecker, SameGoalReplanDoesNotClearXyLatch) {
   auto node =
       std::make_shared<rclcpp_lifecycle::LifecycleNode>("goal_checker_test");
@@ -132,6 +144,34 @@ TEST(PersistentRotateToGoalCritic,
   dwb_msgs::msg::Trajectory2D translating = slow;
   translating.velocity.x = 0.01;
   EXPECT_THROW(critic.scoreTrajectory(translating),
+               dwb_core::IllegalTrajectoryException);
+}
+
+TEST(PersistentRotateToGoalCritic, RejectsRotationAwayFromGoalYaw) {
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>(
+      "critic_direction_test");
+  node->declare_parameter<double>(
+      "FollowPath.PersistentRotateToGoal.lookahead_time", -1.0);
+  robonix_nav2_terminal::PersistentRotateToGoalCritic critic;
+  critic.initialize(node, "PersistentRotateToGoal", "FollowPath", nullptr);
+
+  geometry_msgs::msg::Pose2D current;
+  current.x = 0.10;
+  current.theta = 0.0;
+  geometry_msgs::msg::Pose2D goal;
+  goal.theta = 1.0;
+  nav_2d_msgs::msg::Twist2D stopped;
+  nav_2d_msgs::msg::Path2D path;
+  ASSERT_TRUE(critic.prepare(current, stopped, goal, path));
+
+  dwb_msgs::msg::Trajectory2D toward_goal;
+  toward_goal.velocity.theta = 0.20;
+  toward_goal.poses.push_back(current);
+  EXPECT_NO_THROW(critic.scoreTrajectory(toward_goal));
+
+  dwb_msgs::msg::Trajectory2D away_from_goal = toward_goal;
+  away_from_goal.velocity.theta = -0.20;
+  EXPECT_THROW(critic.scoreTrajectory(away_from_goal),
                dwb_core::IllegalTrajectoryException);
 }
 

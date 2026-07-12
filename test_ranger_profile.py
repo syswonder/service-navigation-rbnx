@@ -57,7 +57,12 @@ class RangerProfileTest(unittest.TestCase):
         self.assertIsNotNone(follow_path)
         self.assertNotIn("path_topic", follow_path.attrib)
 
-    def test_late_first_goal_status_does_not_reset_same_goal(self):
+    def test_bt_loop_allows_action_callbacks_under_slam_load(self):
+        navigator = self.params["bt_navigator"]["ros__parameters"]
+        self.assertEqual(navigator["bt_loop_duration"], 50)
+        self.assertEqual(navigator["default_server_timeout"], 1000)
+
+    def test_action_uuid_owns_goal_identity_after_first_status(self):
         goal_checker = (
             ROOT / "terminal_controller" / "src" / "persistent_goal_checker.cpp"
         ).read_text()
@@ -71,9 +76,19 @@ class RangerProfileTest(unittest.TestCase):
             (goal_checker, "goalChanged(goal_pose)"),
             (critic, "goalChanged(goal)"),
         ):
-            self.assertIn("seen_goal_epoch_ != 0", source)
+            self.assertIn("shouldStartGoal", source)
             self.assertIn("if (epoch != 0)", source)
             self.assertIn(geometry_check, source)
+
+        identity = (
+            ROOT
+            / "terminal_controller"
+            / "include"
+            / "robonix_nav2_terminal"
+            / "navigate_goal_epoch.hpp"
+        ).read_text()
+        self.assertIn("observed_epoch != 0", identity)
+        self.assertIn("observed_epoch != seen_epoch", identity)
 
     def test_yaw_latch_brakes_instead_of_rejecting_every_nonzero_sample(self):
         critic = (
