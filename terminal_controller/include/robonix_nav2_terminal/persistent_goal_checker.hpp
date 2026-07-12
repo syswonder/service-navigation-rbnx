@@ -5,9 +5,11 @@
 
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "action_msgs/msg/goal_status_array.hpp"
 #include "nav2_core/goal_checker.hpp"
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "robonix_nav2_terminal/navigate_goal_epoch.hpp"
 
 namespace robonix_nav2_terminal
 {
@@ -33,6 +35,9 @@ private:
   void startGoal(const geometry_msgs::msg::Pose & goal_pose);
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
+  rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr goal_status_sub_;
+  NavigateGoalEpoch goal_epoch_;
+  uint64_t seen_goal_epoch_{0};
   std::string plugin_name_;
   geometry_msgs::msg::Pose goal_;
   bool have_goal_{false};

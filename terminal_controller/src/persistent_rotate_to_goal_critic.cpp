@@ -20,6 +20,11 @@ void PersistentRotateToGoalCritic::onInit()
     throw std::runtime_error("PersistentRotateToGoalCritic cannot lock node");
   }
   clock_ = node->get_clock();
+  goal_status_sub_ = node->create_subscription<action_msgs::msg::GoalStatusArray>(
+    "/navigate_to_pose/_action/status", rclcpp::QoS(10),
+    [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
+      goal_epoch_.observe(*msg);
+    });
   const std::string prefix = dwb_plugin_name_ + "." + name_ + ".";
   const auto get = [&node, &prefix](const char * key, double value) {
       return nav_2d_utils::searchAndGetParam(node, prefix + key, value);
@@ -88,8 +93,12 @@ bool PersistentRotateToGoalCritic::prepare(
   const geometry_msgs::msg::Pose2D & goal,
   const nav_2d_msgs::msg::Path2D &)
 {
-  if (goalChanged(goal)) {
+  const auto epoch = goal_epoch_.value();
+  if ((epoch != 0 && epoch != seen_goal_epoch_) ||
+    (epoch == 0 && goalChanged(goal)))
+  {
     startGoal(goal);
+    seen_goal_epoch_ = epoch;
   }
   const auto now = clock_->now();
   const double distance = std::hypot(pose.x - goal.x, pose.y - goal.y);

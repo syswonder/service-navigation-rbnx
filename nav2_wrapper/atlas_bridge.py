@@ -110,8 +110,10 @@ _state_lock = threading.Lock()
 _cap_id: str = CAP_ID
 _pkg_root: Path = Path(__file__).resolve().parent.parent
 _nav2_proc: subprocess.Popen | None = None
+_velocity_guard_proc: subprocess.Popen | None = None
 _scan_projector_proc: subprocess.Popen | None = None
 _scan_deskew_proc: subprocess.Popen | None = None
+_scan_filter_proc: subprocess.Popen | None = None
 _initialized = False
 
 # ROS2 client state (initialized inside Driver.Init after nav2 is alive)
@@ -160,8 +162,11 @@ _REQUIRED_DEPS: tuple[tuple[str, str, str], ...] = (
     # robonix/service/map/occupancy_grid → nav2 expects /map for the
     # global costmap's StaticLayer.
     ("map",   "robonix/service/map/occupancy_grid",  "/map"),
-    # robonix/primitive/chassis/odom → nav2 + AMCL want /odom.
-    ("odom",  "robonix/primitive/chassis/odom",      "/odom"),
+    # Consume the deployment's canonical odometry provider directly. Mapping
+    # also consumes this stream, but must not re-declare the same ROS topic as
+    # a second capability owner. Ranger currently pins this to ranger_chassis;
+    # a future Mid360 LIO package can replace it through provider_ids.odom.
+    ("odom",  "robonix/primitive/chassis/odom",       "/odom"),
 )
 
 # Optional deps: if present on atlas, we wire them; if absent, nav2 still
@@ -175,13 +180,15 @@ _OPTIONAL_DEPS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _resolve_dep(contract_id: str) -> str | None:
+def _resolve_dep(contract_id: str, provider_id: str = "") -> str | None:
     """Ask atlas which ROS2 topic backs `contract_id`; return it or None.
 
     Uses the same ATLAS.find_capability + connect_capability path mapping
     uses — we want the resolved topic string, and connecting also records
     nav2 as a consumer of that contract. The Channel is closed immediately."""
-    recs = ATLAS.find_capability(contract_id=contract_id, transport="ros2")
+    recs = ATLAS.find_capability(
+        contract_id=contract_id, transport="ros2", provider_id=provider_id
+    )
     if not recs:
         return None
     rec = recs[0]
@@ -201,6 +208,7 @@ def _build_remap_args(cfg: dict) -> tuple[list[str], list[str]]:
     missing_required is a list of contract_ids that should have been there
     but weren't — caller decides whether to defer / degrade / fail."""
     overrides = dict(cfg.get("topic_remap", {}) or {})
+    providers = dict(cfg.get("provider_ids", {}) or {})
     remap_args: list[str] = []
     missing: list[str] = []
 
@@ -208,7 +216,7 @@ def _build_remap_args(cfg: dict) -> tuple[list[str], list[str]]:
         if key in overrides:
             ep = str(overrides[key])
         else:
-            ep = _resolve_dep(contract_id) or ""
+            ep = _resolve_dep(contract_id, str(providers.get(key) or "")) or ""
         if not ep:
             missing.append(contract_id)
             continue
@@ -223,7 +231,7 @@ def _build_remap_args(cfg: dict) -> tuple[list[str], list[str]]:
         if key in overrides:
             ep = str(overrides[key])
         else:
-            ep = _resolve_dep(contract_id) or ""
+            ep = _resolve_dep(contract_id, str(providers.get(key) or "")) or ""
         if ep:
             remap_args.append(f"{key}:={ep}")
             log.info("resolved (optional) %s → %s = %s", contract_id, default_target, ep)
@@ -248,10 +256,11 @@ def _uses_projected_scan(cfg: dict) -> bool:
 
 
 def _kill_scan_projector() -> None:
-    global _scan_projector_proc, _scan_deskew_proc
-    procs = (_scan_projector_proc, _scan_deskew_proc)
+    global _scan_projector_proc, _scan_deskew_proc, _scan_filter_proc
+    procs = (_scan_projector_proc, _scan_deskew_proc, _scan_filter_proc)
     _scan_projector_proc = None
     _scan_deskew_proc = None
+    _scan_filter_proc = None
     for proc in procs:
         if proc is None:
             continue
@@ -279,7 +288,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
     the standard lidar3d contract, so this package owns a pointcloud-to-scan
     child instead of pushing hardware-specific topic plumbing into the deploy.
     """
-    global _scan_projector_proc, _scan_deskew_proc
+    global _scan_projector_proc, _scan_deskew_proc, _scan_filter_proc
     if not _uses_projected_scan(cfg) or _binding_value(bindings, "scan"):
         return bindings
 
@@ -330,7 +339,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
         "--ros-args",
         "-r", "__node:=robonix_pointcloud_to_laserscan",
         "-r", f"cloud_in:={projector_cloud_topic}",
-        "-r", "scan:=/scanner/scan",
+        "-r", "scan:=/scanner/scan_raw",
         "-p", "target_frame:=base_link",
         "-p", "transform_tolerance:=0.15",
         "-p", "min_height:=0.30",
@@ -358,8 +367,22 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
     if _scan_projector_proc.poll() is not None:
         _kill_scan_projector()
         raise RuntimeError("pointcloud_to_laserscan exited during startup")
+    _scan_filter_proc = subprocess.Popen(
+        [sys.executable, "-m", "nav2_wrapper.scan_filter"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    threading.Thread(
+        target=_pump_output, args=(_scan_filter_proc.stdout, "scan_filter"), daemon=True
+    ).start()
+    time.sleep(0.25)
+    if _scan_filter_proc.poll() is not None:
+        _kill_scan_projector()
+        raise RuntimeError("scan speckle filter exited during startup")
     log.info(
-        "projecting %s to /scanner/scan for Ranger Nav2 (deskew=%s, self-filter range_min=%.3fm)",
+        "projecting %s to /scanner/scan_raw then filtered /scanner/scan "
+        "for Ranger Nav2 (deskew=%s, self-filter range_min=%.3fm)",
         projector_cloud_topic,
         bool(cfg.get("scan_deskewing", False)),
         range_min,
@@ -496,12 +519,71 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     return str(target), []
 
 
+def _materialize_guarded_launch() -> str:
+    """Patch the distro launch so every Nav2 velocity crosses our final guard."""
+    from ament_index_python.packages import get_package_share_directory  # type: ignore
+
+    source = Path(get_package_share_directory("nav2_bringup")) / "launch" / "navigation_launch.py"
+    text = source.read_text(encoding="utf-8")
+    old_behavior = "remappings=remappings)"
+    behavior_marker = "package='nav2_behaviors'"
+    search_from = 0
+    for _ in range(2):
+        behavior_start = text.index(behavior_marker, search_from)
+        behavior_end = text.index("package='nav2_bt_navigator'", behavior_start)
+        behavior = text[behavior_start:behavior_end]
+        if behavior.count(old_behavior) != 1:
+            raise RuntimeError("unsupported nav2 behavior_server launch layout")
+        behavior = behavior.replace(
+            old_behavior,
+            "remappings=remappings + [('cmd_vel', 'cmd_vel_guard_input')])",
+        )
+        text = text[:behavior_start] + behavior + text[behavior_end:]
+        search_from = behavior_end
+    old_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')])"
+    new_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel_guard_input')])"
+    if text.count(old_smoother) != 2:
+        raise RuntimeError("unsupported nav2 velocity_smoother launch layout")
+    text = text.replace(old_smoother, new_smoother)
+    target = _pkg_root / "rbnx-build" / "runtime" / "guarded_navigation_launch.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return str(target)
+
+
+def _spawn_velocity_guard(cfg: dict) -> None:
+    global _velocity_guard_proc
+    env = os.environ.copy()
+    env.update({
+        "ROBONIX_NAV_TRACE_DIR": str(
+            cfg.get("trajectory_log_dir", _pkg_root / "rbnx-build" / "data" / "trajectories")
+        ),
+        "ROBONIX_GUARD_TERMINAL_XY_M": str(cfg.get("guard_terminal_xy_m", 0.45)),
+        "ROBONIX_GUARD_TERMINAL_TIMEOUT_S": str(cfg.get("guard_terminal_timeout_s", 15.0)),
+        "ROBONIX_GUARD_NO_PROGRESS_S": str(cfg.get("guard_no_progress_s", 3.0)),
+        "ROBONIX_GUARD_GLOBAL_TIMEOUT_S": str(cfg.get("guard_global_spin_timeout_s", 25.0)),
+        "ROBONIX_GUARD_GLOBAL_ROTATION_RAD": str(cfg.get("guard_global_spin_limit_rad", 6.783185307)),
+    })
+    _velocity_guard_proc = subprocess.Popen(
+        [sys.executable, "-m", "nav2_wrapper.velocity_guard"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env=env,
+    )
+    threading.Thread(
+        target=_pump_output, args=(_velocity_guard_proc.stdout, "velocity_guard"), daemon=True
+    ).start()
+
+
 def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     global _nav2_proc
     params_file, launch_remaps = _materialize_params(cfg, remap_args)
+    _spawn_velocity_guard(cfg)
+    launch_file = _materialize_guarded_launch()
     use_sim_time = "true" if cfg.get("use_sim_time", False) else "false"
     args = [
-        "ros2", "launch", "nav2_bringup", "navigation_launch.py",
+        "ros2", "launch", launch_file,
         f"use_sim_time:={use_sim_time}",
         f"params_file:={params_file}",
     ]
@@ -522,21 +604,32 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
 
 
 def _kill_nav2() -> None:
+    global _velocity_guard_proc
     _kill_scan_projector()
     p = _nav2_proc
-    if p is None or p.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        p.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
+    if p is not None and p.poll() is None:
         try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
         except ProcessLookupError:
             pass
+        try:
+            p.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    guard = _velocity_guard_proc
+    _velocity_guard_proc = None
+    if guard is not None and guard.poll() is None:
+        try:
+            os.killpg(os.getpgid(guard.pid), signal.SIGTERM)
+            guard.wait(timeout=5.0)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(os.getpgid(guard.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 # ── ROS2 wiring (started after nav2 is alive) ────────────────────────────────
@@ -760,11 +853,14 @@ def init(cfg: dict):
     try:
         _spawn_nav2(cfg, _prepare_scan(cfg, remap_args))
     except Exception as e:  # noqa: BLE001
+        _kill_nav2()
         return Err(f"spawn nav2 failed: {e}")
 
     _start_ros2_thread()
     if not _wait_for_action(action_wait):
-        # Leave nav2 up (degraded is still inspectable) but report failure.
+        # A failed Driver.Init must not orphan controller, scan, or guard
+        # process groups after rbnx reports the package as failed.
+        _kill_nav2()
         return Err(
             f"navigate_to_pose action server did not come up within {action_wait:.1f}s"
         )

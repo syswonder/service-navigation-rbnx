@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.8)
 project(robonix_nav2_terminal)
 
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(angles REQUIRED)
 find_package(dwb_core REQUIRED)
 find_package(dwb_msgs REQUIRED)
@@ -23,7 +24,7 @@ target_include_directories(robonix_nav2_goal_checker PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(robonix_nav2_goal_checker
-  angles geometry_msgs nav2_core nav2_costmap_2d nav2_util pluginlib rclcpp
+  action_msgs angles geometry_msgs nav2_core nav2_costmap_2d nav2_util pluginlib rclcpp
   rclcpp_lifecycle tf2)
 
 add_library(robonix_nav2_dwb_critic SHARED
@@ -33,7 +34,7 @@ target_include_directories(robonix_nav2_dwb_critic PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(robonix_nav2_dwb_critic
-  angles dwb_core dwb_msgs geometry_msgs nav_2d_msgs nav_2d_utils pluginlib
+  action_msgs angles dwb_core dwb_msgs geometry_msgs nav_2d_msgs nav_2d_utils pluginlib
   rclcpp rclcpp_lifecycle)
 
 # Keep the GoalChecker library free of any dwb_core dependency. ControllerServer

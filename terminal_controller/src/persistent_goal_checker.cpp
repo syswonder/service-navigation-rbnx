@@ -23,6 +23,11 @@ void PersistentGoalChecker::initialize(
     throw std::runtime_error("PersistentGoalChecker cannot lock lifecycle node");
   }
   plugin_name_ = plugin_name;
+  goal_status_sub_ = node_->create_subscription<action_msgs::msg::GoalStatusArray>(
+    "/navigate_to_pose/_action/status", rclcpp::QoS(10),
+    [this](const action_msgs::msg::GoalStatusArray::SharedPtr msg) {
+      goal_epoch_.observe(*msg);
+    });
   const auto declare = [this](const char * suffix, double value) {
       nav2_util::declare_parameter_if_not_declared(
         node_, plugin_name_ + "." + suffix, rclcpp::ParameterValue(value));
@@ -81,8 +86,12 @@ bool PersistentGoalChecker::isGoalReached(
   const geometry_msgs::msg::Pose & goal_pose,
   const geometry_msgs::msg::Twist & velocity)
 {
-  if (goalChanged(goal_pose)) {
+  const auto epoch = goal_epoch_.value();
+  if ((epoch != 0 && epoch != seen_goal_epoch_) ||
+    (epoch == 0 && goalChanged(goal_pose)))
+  {
     startGoal(goal_pose);
+    seen_goal_epoch_ = epoch;
   }
   const double distance = std::hypot(
     query_pose.position.x - goal_pose.position.x,

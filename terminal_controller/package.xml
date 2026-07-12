@@ -6,6 +6,7 @@
   <maintainer email="dev@robonix.ai">Robonix</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>action_msgs</depend>
   <depend>angles</depend>
   <depend>dwb_core</depend>
   <depend>dwb_msgs</depend>

@@ -8,6 +8,8 @@
 #include "nav_2d_msgs/msg/twist2_d.hpp"
 #include "rclcpp/clock.hpp"
 #include "rclcpp/time.hpp"
+#include "action_msgs/msg/goal_status_array.hpp"
+#include "robonix_nav2_terminal/navigate_goal_epoch.hpp"
 
 namespace robonix_nav2_terminal
 {
@@ -30,6 +32,9 @@ private:
   [[noreturn]] void reject(const std::string & reason) const;
 
   rclcpp::Clock::SharedPtr clock_;
+  rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr goal_status_sub_;
+  NavigateGoalEpoch goal_epoch_;
+  uint64_t seen_goal_epoch_{0};
   geometry_msgs::msg::Pose2D goal_;
   bool have_goal_{false};
   bool in_window_{false};

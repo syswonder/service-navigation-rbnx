@@ -78,6 +78,15 @@ class RangerProfileTest(unittest.TestCase):
         self.assertIn("fixed_frame_id:=", source)
         self.assertIn("os.killpg(proc.pid, signal.SIGTERM)", source)
 
+    def test_nav_consumes_provider_pinned_canonical_odom(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn('"odom",  "robonix/primitive/chassis/odom"', source)
+        self.assertIn('providers = dict(cfg.get("provider_ids", {}) or {})', source)
+        self.assertIn('provider_id=provider_id', source)
+        self.assertNotIn(
+            '("odom",  "robonix/service/map/odom"', source
+        )
+
     def test_scan_cleanup_kills_child_after_ros2_parent_exits(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         tree = ast.parse(source)
@@ -91,6 +100,7 @@ class RangerProfileTest(unittest.TestCase):
             "subprocess": subprocess,
             "_scan_projector_proc": None,
             "_scan_deskew_proc": None,
+            "_scan_filter_proc": None,
         }
         exec(compile(ast.Module(body=[function], type_ignores=[]), "cleanup", "exec"), namespace)
 
@@ -111,6 +121,34 @@ class RangerProfileTest(unittest.TestCase):
         else:
             os.killpg(parent.pid, signal.SIGKILL)
             self.fail("scan child process group survived cleanup")
+
+    def test_final_velocity_guard_owns_cmd_vel(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", source)
+        self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", source)
+        self.assertIn('"-m", "nav2_wrapper.velocity_guard"', source)
+        guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
+        self.assertIn('create_publisher(Twist, "/cmd_vel"', guard)
+        self.assertIn('CancelGoal, "/navigate_to_pose/_action/cancel_goal"', guard)
+        self.assertIn('LaserScan, "/scanner/scan"', guard)
+        self.assertIn('"scan-anomalies.jsonl"', guard)
+        self.assertIn('baseline - front_min >= 0.40', guard)
+        bridge = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn('"scan:=/scanner/scan_raw"', bridge)
+        self.assertIn('"-m", "nav2_wrapper.scan_filter"', bridge)
+
+    def test_failed_init_cleans_up_all_nav2_children(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn(
+            'except Exception as e:  # noqa: BLE001\n        _kill_nav2()\n'
+            '        return Err(f"spawn nav2 failed: {e}")',
+            source,
+        )
+        self.assertIn(
+            'if not _wait_for_action(action_wait):\n'
+            '        # A failed Driver.Init must not orphan controller, scan, or guard',
+            source,
+        )
 
 
 if __name__ == "__main__":
