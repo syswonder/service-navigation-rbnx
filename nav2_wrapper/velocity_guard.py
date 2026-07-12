@@ -20,7 +20,7 @@ from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 
-from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard
+from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 
 
 def _yaw(q) -> float:
@@ -88,7 +88,7 @@ class VelocityGuardNode(Node):
             self._event("trace_closed", reason="new_goal")
             self._trace.close()
         self._active_uuid = goal_uuid
-        self._active_uuid_raw = list(raw_uuid)
+        self._active_uuid_raw = normalize_uuid_octets(raw_uuid)
         self._cancel_sent = False
         self._robot_pose = None
         self._goal_pose = None

@@ -1,10 +1,22 @@
 import math
 import unittest
 
-from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard
+from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 
 
 class RotationGuardTest(unittest.TestCase):
+    def test_ros_uuid_octets_are_plain_python_ints(self):
+        class ByteLike:
+            def __init__(self, value):
+                self.value = value
+
+            def __int__(self):
+                return self.value
+
+        result = normalize_uuid_octets(ByteLike(value) for value in range(16))
+        self.assertEqual(result, list(range(16)))
+        self.assertTrue(all(type(value) is int for value in result))
+
     def test_terminal_rotation_without_progress_latches(self):
         guard = RotationGuard(GuardLimits(terminal_no_progress_s=3.0))
         guard.begin_goal("goal-a")

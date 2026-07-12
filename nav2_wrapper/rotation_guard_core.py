@@ -10,6 +10,14 @@ def shortest_angle(source: float, target: float) -> float:
     return math.atan2(math.sin(target - source), math.cos(target - source))
 
 
+def normalize_uuid_octets(raw_uuid) -> list[int]:
+    """Return the plain Python integers required by ROS UUID messages."""
+    values = [int(value) for value in raw_uuid]
+    if len(values) != 16 or any(value < 0 or value > 255 for value in values):
+        raise ValueError("goal UUID must contain exactly 16 byte values")
+    return values
+
+
 @dataclass
 class GuardLimits:
     terminal_xy_m: float = 0.45
