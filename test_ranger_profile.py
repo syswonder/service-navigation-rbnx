@@ -105,8 +105,12 @@ class RangerProfileTest(unittest.TestCase):
         exec(compile(ast.Module(body=[function], type_ignores=[]), "cleanup", "exec"), namespace)
 
         parent = subprocess.Popen(
-            ["bash", "-c", "sleep 30 &"], start_new_session=True
+            ["bash", "-c", "sleep 30 & echo $!"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            text=True,
         )
+        child_pid = int(parent.stdout.readline().strip())
         parent.wait(timeout=2.0)
         namespace["_scan_projector_proc"] = parent
         namespace["_kill_scan_projector"]()
@@ -114,12 +118,20 @@ class RangerProfileTest(unittest.TestCase):
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             try:
-                os.killpg(parent.pid, 0)
+                os.kill(child_pid, 0)
             except ProcessLookupError:
+                break
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(child_pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            if not state or state.startswith("Z"):
                 break
             time.sleep(0.05)
         else:
-            os.killpg(parent.pid, signal.SIGKILL)
+            os.kill(child_pid, signal.SIGKILL)
             self.fail("scan child process group survived cleanup")
 
     def test_final_velocity_guard_owns_cmd_vel(self):
