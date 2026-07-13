@@ -196,7 +196,11 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 2.00
+        # Keep the global clearance envelope consistent with the local
+        # controller.  A 2 m gradient overwhelms newly-created local maps and
+        # can make every useful route prohibitively expensive near one wall.
+        inflation_radius: 0.60
+        cost_scaling_factor: 2.2
 
 
 lifecycle_manager:

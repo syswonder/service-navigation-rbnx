@@ -62,6 +62,22 @@ class RangerProfileTest(unittest.TestCase):
         self.assertEqual(navigator["bt_loop_duration"], 50)
         self.assertEqual(navigator["default_server_timeout"], 1000)
 
+    def test_global_inflation_matches_local_ranger_clearance(self):
+        global_params = self.params["global_costmap"]["global_costmap"][
+            "ros__parameters"
+        ]
+        local_params = self.params["local_costmap"]["local_costmap"][
+            "ros__parameters"
+        ]
+        global_inflation = global_params["inflation_layer"]
+        local_inflation = local_params["inflation_layer"]
+        self.assertEqual(global_inflation["inflation_radius"], 0.60)
+        self.assertEqual(global_inflation["cost_scaling_factor"], 2.2)
+        self.assertEqual(
+            global_inflation["inflation_radius"],
+            local_inflation["inflation_radius"],
+        )
+
     def test_action_uuid_owns_goal_identity_after_first_status(self):
         goal_checker = (
             ROOT / "terminal_controller" / "src" / "persistent_goal_checker.cpp"
