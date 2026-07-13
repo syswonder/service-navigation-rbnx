@@ -149,6 +149,13 @@ cumulative rotation stops the controller with an actionable failure. Terminal
 angular velocity is capped at 0.30 rad/s. The Ranger recovery tree has no spin
 or backup motion.
 
+The Ranger global planner also treats map coverage as a safety boundary. For a
+goal in known space it first requests a path with unknown cells forbidden. Only
+when no such path exists does it evaluate an unknown-enabled fallback, which is
+accepted only when unknown exposure is at most 5% and 0.75 m in total, with no
+continuous unknown segment longer than 0.40 m. A goal that is itself unknown is
+logged and handled by the explicit unknown-goal planner mode.
+
 Daytime acceptance uses `scripts/ranger_acceptance.py PLAN.yaml`. It is a dry
 run by default; sending goals requires both `--execute` and
 `--i-understand-robot-will-move`. Each goal is sent once with no automatic

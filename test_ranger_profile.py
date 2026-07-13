@@ -78,6 +78,18 @@ class RangerProfileTest(unittest.TestCase):
             local_inflation["inflation_radius"],
         )
 
+    def test_known_goals_cannot_plan_through_unknown_space(self):
+        planner = self.params["planner_server"]["ros__parameters"]
+        self.assertEqual(
+            planner["GridBased"]["plugin"],
+            "robonix_nav2_terminal::GoalAwareNavfnPlanner",
+        )
+        self.assertFalse(planner["GridBased_known"]["allow_unknown"])
+        self.assertTrue(planner["GridBased_unknown"]["allow_unknown"])
+        self.assertEqual(planner["GridBased"]["max_unknown_ratio"], 0.05)
+        self.assertEqual(planner["GridBased"]["max_unknown_length"], 0.75)
+        self.assertEqual(planner["GridBased"]["max_unknown_run"], 0.40)
+
     def test_action_uuid_owns_goal_identity_after_first_status(self):
         goal_checker = (
             ROOT / "terminal_controller" / "src" / "persistent_goal_checker.cpp"

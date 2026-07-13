@@ -7,8 +7,18 @@ planner_server:
     expected_planner_frequency: 5.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner/NavfnPlanner"
+      plugin: "robonix_nav2_terminal::GoalAwareNavfnPlanner"
+      # Prefer a zero-unknown route. If none exists for a known goal, accept
+      # only a short map-coverage gap; larger unknown shortcuts are rejected.
+      max_unknown_ratio: 0.05
+      max_unknown_length: 0.75
+      max_unknown_run: 0.40
+    GridBased_known:
       tolerance: 0.5
+      allow_unknown: false
+    GridBased_unknown:
+      tolerance: 0.5
+      allow_unknown: true
     tf_buffer_duration: 0.5  # 秒
 
     

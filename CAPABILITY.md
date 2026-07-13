@@ -71,6 +71,12 @@ translation, caps yaw speed, and aborts on excessive XY drift, elapsed time,
 rotation, or lack of yaw progress. Its behavior tree never commands recovery
 spin or backup motion.
 
+For goals in known map cells, the Ranger planner prefers a path containing no
+unknown cells. A fallback may cross only a bounded map-coverage gap (5%, 0.75 m
+total, 0.40 m continuous); larger unknown shortcuts are rejected before the
+controller receives a path. Goals placed in unknown cells use a separate,
+explicitly logged planner mode.
+
 > The robot footprint, velocity/accel limits, and frames currently live in
 > these YAML files (Ranger-Mini / TB3 values). A different body must supply its
 > own `params_file`. Making these config knobs (or sourcing them from `soma`'s
