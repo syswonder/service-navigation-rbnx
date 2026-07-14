@@ -70,6 +70,22 @@ if [[ -n "${ROBONIX_ZENOH_LISTEN:-}" ]]; then
     ZENOH_ARGS+=(-e "ROBONIX_ZENOH_LISTEN=${ROBONIX_ZENOH_LISTEN}")
 fi
 
+# A deploy-owned params_file/BT is resolved relative to the robot manifest,
+# not this package checkout. Preserve rbnx's manifest directory at the same
+# absolute path inside Docker so Docker and native execution agree.
+declare -a DEPLOY_ARGS=()
+if [[ -n "${RBNX_INVOCATION_CWD:-}" ]]; then
+    if [[ ! -d "$RBNX_INVOCATION_CWD" ]]; then
+        echo "[nav2/start] RBNX_INVOCATION_CWD is not a directory: $RBNX_INVOCATION_CWD" >&2
+        exit 2
+    fi
+    DEPLOY_DIR="$(cd "$RBNX_INVOCATION_CWD" && pwd -P)"
+    DEPLOY_ARGS=(
+        -e "RBNX_INVOCATION_CWD=$DEPLOY_DIR"
+        -v "$DEPLOY_DIR:$DEPLOY_DIR:ro"
+    )
+fi
+
 # config arrives via Driver(CMD_INIT) over gRPC; the container's bridge
 # binds NAV2_DRIVER_PORT and registers with atlas at ROBONIX_ATLAS.
 exec docker run --rm \
@@ -84,6 +100,7 @@ exec docker run --rm \
     "${ZENOH_ARGS[@]}" \
     -e NAV2_DRIVER_PORT="${NAV2_DRIVER_PORT:-50235}" \
     -e NAV2_LOG_LEVEL="${NAV2_LOG_LEVEL:-info}" \
+    "${DEPLOY_ARGS[@]}" \
     -v "$(pwd)":/nav2 \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     -v "$(pwd)/docker/no_shm_profile.xml":/etc/fastrtps_no_shm.xml:ro \

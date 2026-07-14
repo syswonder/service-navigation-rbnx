@@ -18,9 +18,8 @@ rest of the stack provides. Goals are tracked in an internal dict so
 status() / cancel() work even after the goal has terminated.
 
 Config (passed via Driver(CMD_INIT, config_json)):
-    params_profile   default "slam"     → config/nav2_params_<profile>.yml
-                                          (slam | sim | default)
-    params_file      unset = derive from params_profile (override w/ abs path)
+    params_file      required; absolute or relative to the robot manifest
+    bt_xml_file      optional; absolute or relative to the robot manifest
     use_sim_time     default false
     action_wait_s    default 45.0       — nav2 lifecycle takes a while
 """
@@ -43,6 +42,11 @@ from pathlib import Path
 import grpc
 
 from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
+from nav2_wrapper.configuration import (
+    resolve_bt_xml_file,
+    resolve_params_file,
+    scan_projection_config,
+)
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -251,8 +255,8 @@ def _binding_value(bindings: list[str], key: str) -> str:
 
 
 def _uses_projected_scan(cfg: dict) -> bool:
-    """Whether this profile requires a LaserScan but may only have lidar3d."""
-    return not cfg.get("params_file") and cfg.get("params_profile", "slam") == "ranger_mini_v3"
+    """Whether the deployment explicitly enables PointCloud2 projection."""
+    return bool(scan_projection_config(cfg)["enabled"])
 
 
 def _kill_scan_projector() -> None:
@@ -282,37 +286,33 @@ def _kill_scan_projector() -> None:
 
 
 def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
-    """Ensure the Ranger 2D ObstacleLayer has a LaserScan source.
-
-    A native lidar contract wins when available. Ranger Mini otherwise exposes
-    the standard lidar3d contract, so this package owns a pointcloud-to-scan
-    child instead of pushing hardware-specific topic plumbing into the deploy.
-    """
+    """Provide a LaserScan from lidar3d when the deployment requests it."""
     global _scan_projector_proc, _scan_deskew_proc, _scan_filter_proc
     if not _uses_projected_scan(cfg) or _binding_value(bindings, "scan"):
         return bindings
 
+    projection = scan_projection_config(cfg)
     cloud_topic = _binding_value(bindings, "scan_cloud")
     if not cloud_topic:
         raise RuntimeError(
-            "ranger_mini_v3 requires robonix/primitive/lidar/lidar or "
-            "robonix/primitive/lidar/lidar3d"
+            "scan_projection requires robonix/primitive/lidar/lidar3d"
         )
     if _scan_projector_proc is not None and _scan_projector_proc.poll() is None:
         return [*bindings, "scan:=/scanner/scan"]
 
-    _, footprint_radius = _soma_footprint_info()
-    range_min = footprint_radius + float(cfg.get("scan_self_filter_margin_m", 0.05))
+    _, footprint_radius, soma_base_frame = _soma_footprint_info()
+    target_frame = str(projection["target_frame"] or soma_base_frame)
+    range_min = footprint_radius + float(projection["self_filter_margin_m"])
     projector_cloud_topic = cloud_topic
-    if bool(cfg.get("scan_deskewing", False)):
+    if bool(projection["deskewing"]):
         projector_cloud_topic = f"{cloud_topic.rstrip('/')}/deskewed"
         deskew_args = [
             "ros2", "run", "rtabmap_util", "lidar_deskewing",
             "--ros-args",
             "-r", "__node:=robonix_nav_lidar_deskewing",
             "-r", f"input_cloud:={cloud_topic}",
-            "-p", f"fixed_frame_id:={cfg.get('odom_frame', 'odom')}",
-            "-p", "wait_for_transform:=0.2",
+            "-p", f"fixed_frame_id:={projection['deskew_fixed_frame']}",
+            "-p", f"wait_for_transform:={projection['deskew_wait_for_transform_s']}",
             "-p", "slerp:=true",
         ]
         try:
@@ -340,12 +340,12 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
         "-r", "__node:=robonix_pointcloud_to_laserscan",
         "-r", f"cloud_in:={projector_cloud_topic}",
         "-r", "scan:=/scanner/scan_raw",
-        "-p", "target_frame:=base_link",
-        "-p", "transform_tolerance:=0.15",
-        "-p", "min_height:=0.30",
-        "-p", "max_height:=1.40",
+        "-p", f"target_frame:={target_frame}",
+        "-p", f"transform_tolerance:={projection['transform_tolerance_s']}",
+        "-p", f"min_height:={projection['min_height_m']}",
+        "-p", f"max_height:={projection['max_height_m']}",
         "-p", f"range_min:={range_min:.3f}",
-        "-p", "range_max:=12.0",
+        "-p", f"range_max:={projection['range_max_m']}",
         "-p", "use_inf:=true",
     ]
     try:
@@ -356,7 +356,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
     except FileNotFoundError as exc:
         _kill_scan_projector()
         raise RuntimeError(
-            "pointcloud_to_laserscan is required for ranger_mini_v3; install "
+            "scan_projection requires "
             "ros-humble-pointcloud-to-laserscan"
         ) from exc
     threading.Thread(
@@ -382,44 +382,20 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
         raise RuntimeError("scan speckle filter exited during startup")
     log.info(
         "projecting %s to /scanner/scan_raw then filtered /scanner/scan "
-        "for Ranger Nav2 (deskew=%s, self-filter range_min=%.3fm)",
+        "for Nav2 (target=%s, deskew=%s, self-filter range_min=%.3fm)",
         projector_cloud_topic,
-        bool(cfg.get("scan_deskewing", False)),
+        target_frame,
+        bool(projection["deskewing"]),
         range_min,
     )
     return [*bindings, "scan:=/scanner/scan"]
 
 
 # ── nav2 subprocess management ───────────────────────────────────────────────
-def _resolve_params_file(cfg: dict) -> str:
-    explicit = cfg.get("params_file")
-    if explicit:
-        p = Path(explicit)
-        if not p.is_absolute():
-            p = _pkg_root / p
-        if not p.is_file():
-            raise FileNotFoundError(f"params_file not found: {p}")
-        return str(p)
-    profile = cfg.get("params_profile", "slam")
-    candidates = {
-        "slam":           _pkg_root / "config" / "nav2_params_slam.yml",
-        "ranger_mini_v3": _pkg_root / "config" / "nav2_params_ranger_mini_v3.yml",
-        "sim":            _pkg_root / "config" / "nav2_params_sim.yml",
-        "default":        _pkg_root / "config" / "nav2_params.yml",
-    }
-    p = candidates.get(profile)
-    if p is None:
-        raise ValueError(f"unknown params_profile {profile!r}; "
-                         f"options: {list(candidates)}")
-    if not p.is_file():
-        raise FileNotFoundError(f"params file for profile {profile!r} missing: {p}")
-    return str(p)
+_footprint_cache: tuple[str, float, str] | None = None
 
 
-_footprint_cache: tuple[str, float] | None = None
-
-
-def _soma_footprint_info() -> tuple[str, float]:
+def _soma_footprint_info() -> tuple[str, float, str]:
     """Resolve the footprint polygon and circumscribed radius through Soma."""
     global _footprint_cache
     if _footprint_cache is not None:
@@ -464,7 +440,7 @@ def _soma_footprint_info() -> tuple[str, float]:
         len(response.points),
         response.inscribed_radius_m,
     )
-    _footprint_cache = (value, radius)
+    _footprint_cache = (value, radius, response.base_frame)
     return _footprint_cache
 
 
@@ -474,7 +450,7 @@ def _soma_footprint() -> str:
 
 def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]:
     """Fill Atlas topic and Soma body tokens in target-specific profiles."""
-    source = Path(_resolve_params_file(cfg))
+    source = resolve_params_file(cfg)
     text = source.read_text(encoding="utf-8")
     if "__ROBONIX_" not in text:
         return str(source), bindings
@@ -485,14 +461,13 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
         if sep:
             resolved[key] = value
 
+    bt_xml = resolve_bt_xml_file(cfg)
     replacements = {
         "__ROBONIX_MAP_TOPIC__": resolved.get("map", ""),
         "__ROBONIX_ODOM_TOPIC__": resolved.get("odom", ""),
         "__ROBONIX_SCAN_TOPIC__": resolved.get("scan", ""),
         "__ROBONIX_SCAN_CLOUD_TOPIC__": resolved.get("scan_cloud", ""),
-        "__ROBONIX_BT_XML__": str(
-            _pkg_root / "config" / "ranger_mini_v3_navigate.xml"
-        ),
+        "__ROBONIX_BT_XML__": str(bt_xml) if bt_xml else "",
     }
     if "__ROBONIX_FOOTPRINT__" in text:
         replacements["__ROBONIX_FOOTPRINT__"] = _soma_footprint()
