@@ -97,6 +97,7 @@ exec docker run --rm \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
     -e RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}" \
+    -e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}" \
     "${ZENOH_ARGS[@]}" \
     -e NAV2_DRIVER_PORT="${NAV2_DRIVER_PORT:-50235}" \
     -e NAV2_LOG_LEVEL="${NAV2_LOG_LEVEL:-info}" \

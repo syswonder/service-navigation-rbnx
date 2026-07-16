@@ -44,6 +44,7 @@ RUN apt-get update \
         ros-humble-tf2-ros \
         ros-humble-pointcloud-to-laserscan \
         ros-humble-rtabmap-util \
+        ros-humble-rmw-cyclonedds-cpp \
         ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 

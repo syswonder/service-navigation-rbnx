@@ -90,6 +90,20 @@ class RuntimeIntegrationTest(unittest.TestCase):
             source,
         )
 
+    def test_cancel_is_latched_before_action_handle_exists(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn('state["cancel_requested"] = True', source)
+        self.assertIn('state["state"] = "CANCELED"', source)
+        self.assertIn("cancel queued until goal acceptance", source)
+        self.assertIn("if cancel_requested:\n        _issue_cancel(gh, gid)", source)
+        self.assertIn("def _cancel_response_cb", source)
+
+    def test_docker_runtime_supports_interface_bound_cyclonedds(self):
+        dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        start = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
+        self.assertIn("ros-humble-rmw-cyclonedds-cpp", dockerfile)
+        self.assertIn('-e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}"', start)
+
     def test_config_directory_contains_only_the_neutral_template(self):
         names = sorted(path.name for path in (ROOT / "config").glob("*"))
         self.assertEqual(names, ["nav2_params.example.yml"])
