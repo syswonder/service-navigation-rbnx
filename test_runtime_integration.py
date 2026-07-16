@@ -103,6 +103,13 @@ class RuntimeIntegrationTest(unittest.TestCase):
         start = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
         self.assertIn("ros-humble-rmw-cyclonedds-cpp", dockerfile)
         self.assertIn('-e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}"', start)
+        self.assertIn(
+            '-e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}"',
+            start,
+        )
+        self.assertIn(
+            '-e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}"', start
+        )
 
     def test_config_directory_contains_only_the_neutral_template(self):
         names = sorted(path.name for path in (ROOT / "config").glob("*"))

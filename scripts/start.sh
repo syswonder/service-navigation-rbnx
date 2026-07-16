@@ -93,6 +93,8 @@ exec docker run --rm \
     --network host \
     --ipc=host \
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
+    -e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}" \
+    -e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}" \
     -e ROBONIX_CAPABILITY_ID="${ROBONIX_CAPABILITY_ID:-nav2}" \
     -e ROBONIX_PKG_HOST_DIR="$(pwd)" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}" \
