@@ -49,6 +49,13 @@ Optional `bt_xml_file` points to a deploy-owned BehaviorTree XML. Existing
 new deployments should not use that field. See `config.spec` for every
 accepted instance field and default.
 
+The final velocity guard publishes to `/cmd_vel` by default for compatibility.
+Set `config.velocity_output_topic` to a fully-qualified non-motion sink such as
+`/robonix/nomotion/cmd_vel` while integrating a physical robot. The
+`ROBONIX_VELOCITY_OUTPUT_TOPIC` environment variable is the fallback when the
+config field is absent; an explicit empty, relative, or malformed topic fails
+startup before the guard creates any ROS endpoint.
+
 ## Runtime
 
 At `Driver(CMD_INIT)`, the wrapper:

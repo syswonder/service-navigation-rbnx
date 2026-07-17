@@ -5,8 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from nav2_wrapper.configuration import (
+    DEFAULT_VELOCITY_OUTPUT_TOPIC,
+    VELOCITY_OUTPUT_TOPIC_ENV,
     resolve_bt_xml_file,
     resolve_params_file,
+    resolve_velocity_output_topic,
     scan_projection_config,
 )
 
@@ -63,6 +66,40 @@ class DeploymentConfigurationTest(unittest.TestCase):
     def test_scan_projection_rejects_unknown_fields(self):
         with self.assertRaisesRegex(ValueError, "unknown scan_projection"):
             scan_projection_config({"scan_projection": {"height": 1.0}})
+
+    def test_velocity_output_topic_defaults_to_cmd_vel(self):
+        self.assertEqual(
+            resolve_velocity_output_topic({}, {}),
+            DEFAULT_VELOCITY_OUTPUT_TOPIC,
+        )
+
+    def test_velocity_output_topic_supports_env_and_config_override(self):
+        environment = {
+            VELOCITY_OUTPUT_TOPIC_ENV: "/robonix/nomotion/cmd_vel",
+        }
+        self.assertEqual(
+            resolve_velocity_output_topic({}, environment),
+            "/robonix/nomotion/cmd_vel",
+        )
+        self.assertEqual(
+            resolve_velocity_output_topic(
+                {"velocity_output_topic": "/cmd_vel"}, environment
+            ),
+            "/cmd_vel",
+        )
+
+    def test_velocity_output_topic_fails_closed_on_empty_or_relative_values(self):
+        invalid = ("", "cmd_vel", "/", "/cmd_vel/", "/cmd//vel", "/9cmd_vel")
+        for topic in invalid:
+            with self.subTest(topic=topic):
+                with self.assertRaises(ValueError):
+                    resolve_velocity_output_topic(
+                        {"velocity_output_topic": topic},
+                        {},
+                    )
+
+        with self.assertRaisesRegex(ValueError, VELOCITY_OUTPUT_TOPIC_ENV):
+            resolve_velocity_output_topic({}, {VELOCITY_OUTPUT_TOPIC_ENV: ""})
 
 
 if __name__ == "__main__":

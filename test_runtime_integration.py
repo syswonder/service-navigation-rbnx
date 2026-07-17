@@ -78,9 +78,25 @@ class RuntimeIntegrationTest(unittest.TestCase):
 
     def test_final_velocity_guard_owns_cmd_vel(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
         self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", source)
         self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", source)
         self.assertIn('"-m", "nav2_wrapper.velocity_guard"', source)
+        self.assertIn('output_topic = resolve_velocity_output_topic(cfg)', source)
+        self.assertIn('"ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic', source)
+        self.assertIn('output_topic = resolve_velocity_output_topic({})', guard)
+        self.assertIn('create_publisher(Twist, output_topic, 10)', guard)
+        self.assertNotIn('create_publisher(Twist, "/cmd_vel"', guard)
+        start = (ROOT / "scripts" / "start.sh").read_text()
+        self.assertIn('"${ROBONIX_VELOCITY_OUTPUT_TOPIC+x}" == "x"', start)
+        self.assertIn('"${VELOCITY_OUTPUT_ARGS[@]}"', start)
+
+    def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))
+        discovery = source.index("_build_remap_args(cfg)", source.index("def init"))
+        self.assertLess(validation, discovery)
+        self.assertIn('return Err(f"invalid velocity_output_topic: {error}")', source)
 
     def test_failed_init_cleans_up_nav_children(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()

@@ -45,6 +45,7 @@ from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
 from nav2_wrapper.configuration import (
     resolve_bt_xml_file,
     resolve_params_file,
+    resolve_velocity_output_topic,
     scan_projection_config,
 )
 
@@ -528,8 +529,14 @@ def _materialize_guarded_launch() -> str:
 
 def _spawn_velocity_guard(cfg: dict) -> None:
     global _velocity_guard_proc
+    output_topic = resolve_velocity_output_topic(cfg)
     env = os.environ.copy()
     env.update({
+        # Always pass a validated, fully-qualified topic explicitly.  This
+        # prevents the child from inheriting an empty/relative value and lets
+        # deployments route guarded output to a non-motion sink until their
+        # physical motion gate is deliberately enabled.
+        "ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic,
         "ROBONIX_NAV_TRACE_DIR": str(
             cfg.get("trajectory_log_dir", _pkg_root / "rbnx-build" / "data" / "trajectories")
         ),
@@ -888,6 +895,14 @@ def init(cfg: dict):
     with _state_lock:
         if _initialized:
             return Ok()
+
+    # Reject an ambiguous velocity destination before Atlas discovery or any
+    # scan/Nav2 child is started.  _spawn_velocity_guard resolves it again and
+    # explicitly passes the validated value into the child environment.
+    try:
+        resolve_velocity_output_topic(cfg)
+    except (TypeError, ValueError) as error:
+        return Err(f"invalid velocity_output_topic: {error}")
 
     action_wait = float(cfg.get("action_wait_s", 45.0))
 
