@@ -78,9 +78,25 @@ class RuntimeIntegrationTest(unittest.TestCase):
 
     def test_final_velocity_guard_owns_cmd_vel(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
         self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", source)
         self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", source)
         self.assertIn('"-m", "nav2_wrapper.velocity_guard"', source)
+        self.assertIn('output_topic = resolve_velocity_output_topic(cfg)', source)
+        self.assertIn('"ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic', source)
+        self.assertIn('output_topic = resolve_velocity_output_topic({})', guard)
+        self.assertIn('create_publisher(Twist, output_topic, 10)', guard)
+        self.assertNotIn('create_publisher(Twist, "/cmd_vel"', guard)
+        start = (ROOT / "scripts" / "start.sh").read_text()
+        self.assertIn('"${ROBONIX_VELOCITY_OUTPUT_TOPIC+x}" == "x"', start)
+        self.assertIn('"${VELOCITY_OUTPUT_ARGS[@]}"', start)
+
+    def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))
+        discovery = source.index("_build_remap_args(cfg)", source.index("def init"))
+        self.assertLess(validation, discovery)
+        self.assertIn('return Err(f"invalid velocity_output_topic: {error}")', source)
 
     def test_failed_init_cleans_up_nav_children(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
@@ -89,6 +105,42 @@ class RuntimeIntegrationTest(unittest.TestCase):
             '        return Err(f"spawn nav2 failed: {e}")',
             source,
         )
+
+    def test_cancel_is_latched_before_action_handle_exists(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn('state["cancel_requested"] = True', source)
+        self.assertIn('state["state"] = "CANCELED"', source)
+        self.assertIn("cancel queued until goal acceptance", source)
+        self.assertIn("if cancel_requested:\n        _issue_cancel(gh, gid)", source)
+        self.assertIn("def _cancel_response_cb", source)
+
+    def test_docker_runtime_supports_interface_bound_cyclonedds(self):
+        dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        start = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
+        self.assertIn("ros-humble-rmw-cyclonedds-cpp", dockerfile)
+        self.assertIn('-e CYCLONEDDS_URI="${CYCLONEDDS_URI:-}"', start)
+        self.assertIn(
+            '-e ROBONIX_PROVIDER_BIND_HOST="${ROBONIX_PROVIDER_BIND_HOST:-0.0.0.0}"',
+            start,
+        )
+        self.assertIn(
+            '-e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}"', start
+        )
+
+    def test_codegen_is_mcp_only_for_every_deployment_target(self):
+        build = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+        native_start = (ROOT / "scripts" / "start_native.sh").read_text(
+            encoding="utf-8"
+        )
+        docker_entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("FLAGS=(--mcp)", build)
+        self.assertNotIn("--ros2", build)
+        self.assertNotIn("ROS2_IDL", build)
+        for runtime_script in (native_start, docker_entrypoint):
+            self.assertNotIn("codegen/ros2_idl", runtime_script)
 
     def test_config_directory_contains_only_the_neutral_template(self):
         names = sorted(path.name for path in (ROOT / "config").glob("*"))

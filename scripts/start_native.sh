@@ -17,9 +17,6 @@ if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
 fi
 # shellcheck disable=SC1091
 set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
-if [[ -f "$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash" ]]; then
-    set +u; source "$PKG/rbnx-build/codegen/ros2_idl/install/setup.bash"; set -u
-fi
 if [[ -f "$PKG/rbnx-build/terminal_controller/install/setup.bash" ]]; then
     set +u; source "$PKG/rbnx-build/terminal_controller/install/setup.bash"; set -u
 fi

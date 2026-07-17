@@ -1,4 +1,4 @@
-"""Final /cmd_vel guard and passive per-NavigateToPose trajectory recorder."""
+"""Final velocity guard and passive per-NavigateToPose trajectory recorder."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 
+from nav2_wrapper.configuration import resolve_velocity_output_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 
 
@@ -33,6 +34,9 @@ def _uuid_text(raw) -> str:
 
 class VelocityGuardNode(Node):
     def __init__(self):
+        # Validate before constructing the ROS node or creating any endpoint.
+        # An invalid/empty/relative output must fail closed with no publisher.
+        output_topic = resolve_velocity_output_topic({})
         super().__init__("robonix_velocity_guard")
         limits = GuardLimits(
             terminal_xy_m=float(os.getenv("ROBONIX_GUARD_TERMINAL_XY_M", "0.45")),
@@ -56,7 +60,7 @@ class VelocityGuardNode(Node):
         self._front_min_history = deque(maxlen=20)
         self._last_scan_summary_at = 0.0
 
-        self._pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self._pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, "/cmd_vel_guard_input", self._on_cmd, 20)
         self.create_subscription(Odometry, "/odom", self._on_odom, 50)
         self.create_subscription(NavPath, "/plan", self._on_plan, 10)
@@ -72,7 +76,9 @@ class VelocityGuardNode(Node):
         )
         self._cancel = self.create_client(CancelGoal, "/navigate_to_pose/_action/cancel_goal")
         self.create_timer(0.05, self._publish_latched_zero)
-        self.get_logger().info(f"guard active; traces={self._trace_dir}")
+        self.get_logger().info(
+            f"guard active; output={output_topic}; traces={self._trace_dir}"
+        )
 
     def _event(self, kind: str, **values) -> None:
         if self._trace is None:

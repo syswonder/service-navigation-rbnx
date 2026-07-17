@@ -49,6 +49,13 @@ Optional `bt_xml_file` points to a deploy-owned BehaviorTree XML. Existing
 new deployments should not use that field. See `config.spec` for every
 accepted instance field and default.
 
+The final velocity guard publishes to `/cmd_vel` by default for compatibility.
+Set `config.velocity_output_topic` to a fully-qualified non-motion sink such as
+`/robonix/nomotion/cmd_vel` while integrating a physical robot. The
+`ROBONIX_VELOCITY_OUTPUT_TOPIC` environment variable is the fallback when the
+config field is absent; an explicit empty, relative, or malformed topic fails
+startup before the guard creates any ROS endpoint.
+
 ## Runtime
 
 At `Driver(CMD_INIT)`, the wrapper:
@@ -63,6 +70,13 @@ Missing required providers return `deferred`. Invalid config or a Nav2 startup
 failure returns `error` and tears down every child process.
 
 ## Build and tests
+
+Navigation generates only its Atlas MCP bindings on every deployment target.
+It deliberately does not generate, build, or source a Robonix ROS 2 IDL
+overlay: the provider talks to Nav2 through the ROS 2 interfaces supplied by
+the selected Humble installation, while its own public capability transport is
+gRPC/MCP. Jetson native builds source only the system ROS 2 installation and
+the locally built terminal-controller plugin overlay.
 
 ```bash
 bash scripts/build.sh

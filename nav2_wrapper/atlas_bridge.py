@@ -45,6 +45,7 @@ from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
 from nav2_wrapper.configuration import (
     resolve_bt_xml_file,
     resolve_params_file,
+    resolve_velocity_output_topic,
     scan_projection_config,
 )
 
@@ -528,8 +529,14 @@ def _materialize_guarded_launch() -> str:
 
 def _spawn_velocity_guard(cfg: dict) -> None:
     global _velocity_guard_proc
+    output_topic = resolve_velocity_output_topic(cfg)
     env = os.environ.copy()
     env.update({
+        # Always pass a validated, fully-qualified topic explicitly.  This
+        # prevents the child from inheriting an empty/relative value and lets
+        # deployments route guarded output to a non-motion sink until their
+        # physical motion gate is deliberately enabled.
+        "ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic,
         "ROBONIX_NAV_TRACE_DIR": str(
             cfg.get("trajectory_log_dir", _pkg_root / "rbnx-build" / "data" / "trajectories")
         ),
@@ -721,17 +728,72 @@ def _goal_response_cb(fut, gid: str):
         gh = fut.result()
     except Exception as e:  # noqa: BLE001
         with _state_lock:
-            _goal_states[gid] = {"state": "FAILED", "detail": str(e)}
+            previous = _goal_states.get(gid, {})
+            canceled = bool(previous.get("cancel_requested"))
+            _goal_states[gid] = {
+                "state": "CANCELED" if canceled else "FAILED",
+                "detail": "canceled before acceptance" if canceled else str(e),
+            }
         return
     if not gh.accepted:
         with _state_lock:
-            _goal_states[gid] = {"state": "FAILED", "detail": "goal rejected"}
+            previous = _goal_states.get(gid, {})
+            canceled = bool(previous.get("cancel_requested"))
+            _goal_states[gid] = {
+                "state": "CANCELED" if canceled else "FAILED",
+                "detail": "canceled before acceptance" if canceled else "goal rejected",
+            }
         return
     with _state_lock:
+        previous = _goal_states.get(gid, {})
+        cancel_requested = bool(previous.get("cancel_requested"))
         _goal_handles[gid] = gh
-        _goal_states[gid] = {"state": "RUNNING", "detail": "goal accepted"}
+        _goal_states[gid] = {
+            "state": "RUNNING",
+            "detail": (
+                "goal accepted; forwarding queued cancel"
+                if cancel_requested
+                else "goal accepted"
+            ),
+            "cancel_requested": cancel_requested,
+        }
     res_fut = gh.get_result_async()
     res_fut.add_done_callback(lambda f: _result_cb(f, gid))
+    if cancel_requested:
+        _issue_cancel(gh, gid)
+
+
+def _cancel_response_cb(fut, gid: str) -> None:
+    try:
+        response = fut.result()
+        accepted = bool(getattr(response, "goals_canceling", []))
+        detail = (
+            "cancel accepted by Nav2"
+            if accepted
+            else "cancel rejected by Nav2; goal remains active"
+        )
+    except Exception as error:  # noqa: BLE001
+        accepted = False
+        detail = f"cancel response failed; goal may remain active: {error}"
+    with _state_lock:
+        state = _goal_states.get(gid)
+        if state is not None and state.get("state") == "RUNNING":
+            state["detail"] = detail
+            state["cancel_requested"] = accepted
+
+
+def _issue_cancel(goal_handle, gid: str) -> tuple[bool, str]:
+    try:
+        future = goal_handle.cancel_goal_async()
+        future.add_done_callback(lambda f, g=gid: _cancel_response_cb(f, g))
+    except Exception as error:  # noqa: BLE001
+        with _state_lock:
+            state = _goal_states.get(gid)
+            if state is not None:
+                state["detail"] = f"cancel request failed; goal may remain active: {error}"
+                state["cancel_requested"] = False
+        return False, f"cancel failed: {error}"
+    return True, "cancel requested"
 
 
 def _feedback_cb(message, gid: str) -> None:
@@ -772,6 +834,17 @@ def _result_cb(fut, gid: str):
 
 
 def _dispatch_goal(node, gid: str, payload: dict):
+    with _state_lock:
+        current = _goal_states.get(gid)
+        if current is None:
+            return
+        if current.get("state") == "CANCELED" and current.get("cancel_requested"):
+            return
+        # Claim the queue entry while holding the same lock used by cancel.
+        # A cancel racing after this point is latched and forwarded as soon as
+        # Nav2 returns the goal handle; it must not look terminal prematurely.
+        current["state"] = "RUNNING"
+        current["detail"] = "dispatching goal"
     pose = _make_pose(node, payload["frame_id"], payload["x"], payload["y"], payload["yaw"])
     goal_msg = _NavigateToPose.Goal()
     goal_msg.pose = pose
@@ -787,7 +860,17 @@ def _dispatch_goal(node, gid: str, payload: dict):
     )
     send_future.add_done_callback(lambda f, g=gid: _goal_response_cb(f, g))
     with _state_lock:
-        _goal_states[gid] = {"state": "RUNNING", "detail": "goal sent"}
+        previous = _goal_states.get(gid, {})
+        cancel_requested = bool(previous.get("cancel_requested"))
+        _goal_states[gid] = {
+            "state": "RUNNING",
+            "detail": (
+                "goal sent; cancel queued until acceptance"
+                if cancel_requested
+                else "goal sent"
+            ),
+            "cancel_requested": cancel_requested,
+        }
 
 
 # ── lifecycle (Driver CMD_INIT / CMD_SHUTDOWN via robonix_api.Service) ────────
@@ -812,6 +895,14 @@ def init(cfg: dict):
     with _state_lock:
         if _initialized:
             return Ok()
+
+    # Reject an ambiguous velocity destination before Atlas discovery or any
+    # scan/Nav2 child is started.  _spawn_velocity_guard resolves it again and
+    # explicitly passes the validated value into the child environment.
+    try:
+        resolve_velocity_output_topic(cfg)
+    except (TypeError, ValueError) as error:
+        return Err(f"invalid velocity_output_topic: {error}")
 
     action_wait = float(cfg.get("action_wait_s", 45.0))
 
@@ -867,15 +958,15 @@ def _navigate_impl(goal) -> dict:
     run_id = str(uuid.uuid4())
     frame_id = goal.header.frame_id or "map"
     yaw = _quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
+    with _state_lock:
+        _last_run_id = run_id
+        _goal_states[run_id] = {"state": "PENDING", "detail": "queued"}
     _nav_queue.put((run_id, {
         "frame_id": frame_id,
         "x": float(goal.pose.position.x),
         "y": float(goal.pose.position.y),
         "yaw": float(yaw),
     }))
-    with _state_lock:
-        _last_run_id = run_id
-        _goal_states[run_id] = {"state": "PENDING", "detail": "queued"}
     return {"accepted": True, "run_id": run_id, "detail": "queued"}
 
 
@@ -897,14 +988,27 @@ def _cancel_impl(run_id: str) -> dict:
     """Cancel an explicit run id, or the most recent active navigation run."""
     with _state_lock:
         resolved = _resolve_run_id(run_id)
+        state = _goal_states.get(resolved)
+        if state is None:
+            return {"accepted": False, "detail": "unknown run_id"}
+        if state.get("state") in {"SUCCEEDED", "FAILED", "CANCELED"}:
+            return {
+                "accepted": False,
+                "detail": f"run is already {state.get('state', 'terminal').lower()}",
+            }
         gh = _goal_handles.get(resolved)
-    if gh is None:
-        return {"accepted": False, "detail": "no active goal handle"}
-    try:
-        gh.cancel_goal_async()  # type: ignore[union-attr]
-    except Exception as e:  # noqa: BLE001
-        return {"accepted": False, "detail": f"cancel failed: {e}"}
-    return {"accepted": True, "detail": "cancel requested"}
+        if gh is None:
+            state["cancel_requested"] = True
+            if state.get("state") == "PENDING":
+                state["state"] = "CANCELED"
+                state["detail"] = "canceled before dispatch"
+            else:
+                state["detail"] = "cancel queued until goal acceptance"
+            return {"accepted": True, "detail": state["detail"]}
+        state["cancel_requested"] = True
+        state["detail"] = "submitting cancel to Nav2"
+    accepted, detail = _issue_cancel(gh, resolved)
+    return {"accepted": accepted, "detail": detail}
 
 
 # ── gRPC servicers ───────────────────────────────────────────────────────────

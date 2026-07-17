@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import logging
+import re
 from pathlib import Path
+from typing import Mapping
 
 
 log = logging.getLogger("nav2_wrapper")
@@ -16,6 +18,9 @@ LEGACY_PROFILE_FILES = {
     "sim": "nav2_params_sim.yml",
     "ranger_mini_v3": "nav2_params_ranger_mini_v3.yml",
 }
+
+VELOCITY_OUTPUT_TOPIC_ENV = "ROBONIX_VELOCITY_OUTPUT_TOPIC"
+DEFAULT_VELOCITY_OUTPUT_TOPIC = "/cmd_vel"
 
 
 def deployment_root() -> Path:
@@ -70,6 +75,49 @@ def resolve_bt_xml_file(cfg: dict) -> Path | None:
         )
         return (LEGACY_ROOT / "ranger_mini_v3_navigate.xml").resolve()
     return None
+
+
+def validate_absolute_ros_topic(value: object, field: str) -> str:
+    """Return a safe fully-qualified ROS topic or reject it.
+
+    The velocity guard is the final process in the motion path, so accepting a
+    relative, private, substituted, or otherwise ambiguous name here could
+    silently reconnect Nav2 to an unintended publisher.  Keep validation
+    independent of rclpy so deployment configuration can be checked offline.
+    """
+    topic = str(value if value is not None else "").strip()
+    if not topic:
+        raise ValueError(f"{field} must not be empty")
+    if not topic.startswith("/"):
+        raise ValueError(f"{field} must be an absolute ROS topic: {topic!r}")
+    token = r"[A-Za-z_][A-Za-z0-9_]*"
+    if re.fullmatch(rf"/{token}(?:/{token})*", topic) is None:
+        raise ValueError(f"{field} is not a valid absolute ROS topic: {topic!r}")
+    return topic
+
+
+def resolve_velocity_output_topic(
+    cfg: dict,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the guard's sole velocity output with config taking priority.
+
+    An explicitly supplied empty config or environment value is an error.  A
+    default is used only when neither source is present, preserving historical
+    ``/cmd_vel`` behavior while allowing a deployment to select a deliberately
+    non-motion topic during integration.
+    """
+    environment = os.environ if environ is None else environ
+    if "velocity_output_topic" in cfg:
+        raw = cfg["velocity_output_topic"]
+        field = "velocity_output_topic"
+    elif VELOCITY_OUTPUT_TOPIC_ENV in environment:
+        raw = environment[VELOCITY_OUTPUT_TOPIC_ENV]
+        field = VELOCITY_OUTPUT_TOPIC_ENV
+    else:
+        raw = DEFAULT_VELOCITY_OUTPUT_TOPIC
+        field = "velocity_output_topic"
+    return validate_absolute_ros_topic(raw, field)
 
 
 def scan_projection_config(cfg: dict) -> dict[str, object]:

@@ -115,6 +115,15 @@ optional:
       Directory for per-goal JSONL trajectories and scan anomaly records.
       Use an absolute path when traces must live outside the package build
       directory.
+  velocity_output_topic:
+    type: string
+    default: /cmd_vel
+    env: ROBONIX_VELOCITY_OUTPUT_TOPIC
+    description: >-
+      Fully-qualified ROS topic on which the final velocity guard publishes.
+      Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
+      The deployment config takes priority over the environment. Empty,
+      relative, private, substituted, or malformed topic names fail startup.
   guard_terminal_xy_m:
     type: number
     default: 0.45
