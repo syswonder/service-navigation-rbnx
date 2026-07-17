@@ -111,6 +111,21 @@ class RuntimeIntegrationTest(unittest.TestCase):
             '-e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}"', start
         )
 
+    def test_codegen_is_mcp_only_for_every_deployment_target(self):
+        build = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+        native_start = (ROOT / "scripts" / "start_native.sh").read_text(
+            encoding="utf-8"
+        )
+        docker_entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("FLAGS=(--mcp)", build)
+        self.assertNotIn("--ros2", build)
+        self.assertNotIn("ROS2_IDL", build)
+        for runtime_script in (native_start, docker_entrypoint):
+            self.assertNotIn("codegen/ros2_idl", runtime_script)
+
     def test_config_directory_contains_only_the_neutral_template(self):
         names = sorted(path.name for path in (ROOT / "config").glob("*"))
         self.assertEqual(names, ["nav2_params.example.yml"])

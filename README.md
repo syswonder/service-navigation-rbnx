@@ -64,6 +64,13 @@ failure returns `error` and tears down every child process.
 
 ## Build and tests
 
+Navigation generates only its Atlas MCP bindings on every deployment target.
+It deliberately does not generate, build, or source a Robonix ROS 2 IDL
+overlay: the provider talks to Nav2 through the ROS 2 interfaces supplied by
+the selected Humble installation, while its own public capability transport is
+gRPC/MCP. Jetson native builds source only the system ROS 2 installation and
+the locally built terminal-controller plugin overlay.
+
 ```bash
 bash scripts/build.sh
 python3 -m unittest -v \
