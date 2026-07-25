@@ -48,7 +48,9 @@ RUN apt-get update \
         ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 
+# grpcio-tools 1.83+ needs setuptools>=77, while ROS colcon-core requires <80.
 RUN pip install --no-cache-dir \
+        'setuptools>=77,<80' \
         grpcio>=1.60.0 \
         grpcio-tools>=1.60.0 \
         mcp>=1.0 \

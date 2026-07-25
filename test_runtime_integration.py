@@ -169,6 +169,7 @@ class RuntimeIntegrationTest(unittest.TestCase):
             encoding="utf-8"
         )
 
+        self.assertIn("'setuptools>=77,<80'", dockerfile)
         self.assertIn("grpcio-tools>=1.60.0", dockerfile)
         self.assertIn('runtime_proto="$(rbnx path runtime-proto)"', start)
         self.assertIn("--network none", start)
