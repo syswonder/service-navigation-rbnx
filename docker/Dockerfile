@@ -50,6 +50,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
         grpcio>=1.60.0 \
+        grpcio-tools>=1.60.0 \
         mcp>=1.0 \
         fastmcp>=3 \
         protobuf>=4.25.0 \

@@ -25,27 +25,57 @@ class RuntimeIntegrationTest(unittest.TestCase):
             package = root / "package"
             deploy = root / "robot deploy"
             fake_bin = root / "bin"
+            runtime_proto = root / "runtime-proto"
             package.mkdir()
             deploy.mkdir()
             fake_bin.mkdir()
+            runtime_proto.mkdir()
+            (runtime_proto / "atlas.proto").write_text(
+                'syntax = "proto3";\n', encoding="utf-8"
+            )
+            proto_staging = package / "rbnx-build" / "proto-staging"
+            proto_staging.mkdir(parents=True)
+            (proto_staging / "navigation.proto").write_text(
+                'syntax = "proto3";\n', encoding="utf-8"
+            )
             docker_args = root / "docker.args"
             docker = fake_bin / "docker"
             docker.write_text(
                 '#!/usr/bin/env bash\n'
                 'if [[ "${1:-}" == run ]]; then\n'
+                '  if [[ " $* " == *" --network none "* ]]; then\n'
+                '    for arg in "$@"; do\n'
+                '      if [[ "$arg" == *:/proto-gen ]]; then\n'
+                '        output="${arg%:/proto-gen}"\n'
+                '        touch "$output/atlas_pb2.py"\n'
+                '        touch "$output/navigation_pb2.py"\n'
+                '        touch "$output/robonix_contracts_pb2_grpc.py"\n'
+                '      fi\n'
+                '    done\n'
+                '    exit 0\n'
+                '  fi\n'
                 '  printf "%s\\n" "$@" > "$DOCKER_ARGS_FILE"\n'
                 "fi\n",
                 encoding="utf-8",
             )
             docker.chmod(0o755)
             rbnx = fake_bin / "rbnx"
-            rbnx.write_text('#!/usr/bin/env bash\necho /tmp/robonix-api\n')
+            rbnx.write_text(
+                '#!/usr/bin/env bash\n'
+                'if [[ "${1:-}" == path && "${2:-}" == runtime-proto ]]; then\n'
+                '  echo "$RUNTIME_PROTO_DIR"\n'
+                'else\n'
+                '  echo /tmp/robonix-api\n'
+                'fi\n',
+                encoding="utf-8",
+            )
             rbnx.chmod(0o755)
             env = os.environ.copy()
             env.update(
                 {
                     "PATH": f"{fake_bin}:/usr/bin:/bin",
                     "DOCKER_ARGS_FILE": str(docker_args),
+                    "RUNTIME_PROTO_DIR": str(runtime_proto),
                     "RBNX_PACKAGE_ROOT": str(package),
                     "RBNX_INVOCATION_CWD": str(deploy),
                     "ROBONIX_NAV2_FORCE": "docker",
@@ -61,6 +91,11 @@ class RuntimeIntegrationTest(unittest.TestCase):
             args = docker_args.read_text(encoding="utf-8").splitlines()
             self.assertIn(f"RBNX_INVOCATION_CWD={deploy}", args)
             self.assertIn(f"{deploy}:{deploy}:ro", args)
+            self.assertIn(
+                f"{package}/rbnx-build/codegen/nav2_proto_gen:"
+                "/nav2/rbnx-build/codegen/proto_gen:ro",
+                args,
+            )
 
     def test_nav_consumes_provider_pinned_canonical_odom(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
@@ -126,6 +161,25 @@ class RuntimeIntegrationTest(unittest.TestCase):
         self.assertIn(
             '-e ROBONIX_ADVERTISE_HOST="${ROBONIX_ADVERTISE_HOST:-}"', start
         )
+
+    def test_docker_codegen_matches_and_validates_runtime_protobuf(self):
+        dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        start = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
+        entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("grpcio-tools>=1.60.0", dockerfile)
+        self.assertIn('runtime_proto="$(rbnx path runtime-proto)"', start)
+        self.assertIn("--network none", start)
+        self.assertIn("python3 -m grpc_tools.protoc", start)
+        self.assertIn("[importlib.import_module(name) for name in modules]", start)
+        self.assertIn("codegen/nav2_proto_gen", start)
+        self.assertIn(
+            "/nav2/rbnx-build/codegen/proto_gen:ro",
+            start,
+        )
+        self.assertIn("missing runtime-compatible protobuf stubs", entrypoint)
 
     def test_codegen_is_mcp_only_for_every_deployment_target(self):
         build = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")

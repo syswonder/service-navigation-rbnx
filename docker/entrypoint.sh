@@ -36,8 +36,18 @@ configure_zenoh_session() {
 configure_zenoh_session
 cd /nav2
 
-# Generated atlas_pb2 etc. live under <pkg>/rbnx-build/codegen/proto_gen
-# (rbnx codegen default). robonix-api is bind-mounted at /robonix-api.
+# start.sh generates these stubs with this exact image and bind-masks the
+# host-generated proto_gen directory. Fail with a focused diagnostic instead
+# of surfacing an opaque protobuf descriptor traceback from atlas_bridge.
+PROTO_GEN=/nav2/rbnx-build/codegen/proto_gen
+if [ ! -f "$PROTO_GEN/atlas_pb2.py" ] \
+    || [ ! -f "$PROTO_GEN/navigation_pb2.py" ] \
+    || [ ! -f "$PROTO_GEN/robonix_contracts_pb2_grpc.py" ]; then
+    echo "[entrypoint] missing runtime-compatible protobuf stubs in $PROTO_GEN; rebuild and restart navigation" >&2
+    exit 1
+fi
+
+# robonix-api is bind-mounted at /robonix-api.
 export PYTHONPATH="/nav2:/nav2/rbnx-build/codegen/proto_gen:/nav2/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}"
 if [ -d /robonix-api ]; then
     export PYTHONPATH="/robonix-api:${PYTHONPATH}"
