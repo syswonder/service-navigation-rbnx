@@ -49,14 +49,75 @@ fi
 set -u
 CT="${ROBONIX_NAV2_CONTAINER:-robonix_nav2}"
 IMG="${ROBONIX_NAV2_IMAGE:-robonix-nav2}"
+RUNTIME_PROTO_TMP=""
 
 cleanup() {
     docker stop "$CT" >/dev/null 2>&1 || true
+    if [[ -n "$RUNTIME_PROTO_TMP" ]]; then
+        rm -rf -- "$RUNTIME_PROTO_TMP"
+    fi
     kill -- "-$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 docker rm -f "$CT" >/dev/null 2>&1 || true
+
+# `rbnx codegen` uses the host's active Python grpc_tools installation, while
+# this deployment imports generated modules with the Docker image's protobuf
+# runtime. Those versions are allowed to differ, and an old host generator can
+# therefore produce descriptors that protobuf 4+ refuses to import. Generate a
+# Docker-only copy with the exact grpc_tools/protobuf stack that will execute
+# it, validate every generated module offline, then atomically expose it to the
+# runtime container. Keep the host output intact for native deployments.
+prepare_runtime_proto_gen() {
+    local proto_staging="$PKG/rbnx-build/proto-staging"
+    local runtime_proto
+    local runtime_proto_gen="$PKG/rbnx-build/codegen/nav2_proto_gen"
+
+    runtime_proto="$(rbnx path runtime-proto)" || {
+        echo "[nav2/start] cannot resolve Robonix runtime proto directory" >&2
+        return 1
+    }
+    [[ -d "$runtime_proto" && -f "$runtime_proto/atlas.proto" ]] || {
+        echo "[nav2/start] missing runtime atlas.proto: $runtime_proto" >&2
+        return 1
+    }
+    [[ -d "$proto_staging" ]] \
+        && find "$proto_staging" -maxdepth 1 -type f -name '*.proto' -print -quit \
+            | grep -q . || {
+        echo "[nav2/start] missing staged package protos; run rbnx build first" >&2
+        return 1
+    }
+
+    mkdir -p "$PKG/rbnx-build/codegen"
+    RUNTIME_PROTO_TMP="$(mktemp -d "${runtime_proto_gen}.tmp.XXXXXX")"
+
+    docker run --rm \
+        --network none \
+        --entrypoint sh \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp \
+        -v "$runtime_proto:/runtime-proto:ro" \
+        -v "$proto_staging:/proto-staging:ro" \
+        -v "$RUNTIME_PROTO_TMP:/proto-gen" \
+        "$IMG" -ec '
+            python3 -m grpc_tools.protoc \
+                -I/runtime-proto \
+                -I/proto-staging \
+                --python_out=/proto-gen \
+                --grpc_python_out=/proto-gen \
+                /runtime-proto/*.proto \
+                /proto-staging/*.proto
+            PYTHONPATH=/proto-gen python3 -c '\''import importlib, pathlib; p = pathlib.Path("/proto-gen"); modules = sorted({f.stem for f in p.glob("*_pb2.py")} | {f.stem for f in p.glob("*_pb2_grpc.py")}); assert modules; [importlib.import_module(name) for name in modules]'\''
+        '
+
+    rm -rf -- "$runtime_proto_gen"
+    mv -- "$RUNTIME_PROTO_TMP" "$runtime_proto_gen"
+    RUNTIME_PROTO_TMP=""
+    echo "[nav2/start] runtime-compatible protobuf stubs ready"
+}
+
+prepare_runtime_proto_gen
 mkdir -p rbnx-build/data
 
 declare -a ZENOH_ARGS=()
@@ -116,6 +177,7 @@ exec docker run --rm \
     -e NAV2_LOG_LEVEL="${NAV2_LOG_LEVEL:-info}" \
     "${DEPLOY_ARGS[@]}" \
     -v "$(pwd)":/nav2 \
+    -v "$PKG/rbnx-build/codegen/nav2_proto_gen:/nav2/rbnx-build/codegen/proto_gen:ro" \
     -v "$(rbnx path robonix-api)":/robonix-api:ro \
     -v "$(pwd)/docker/no_shm_profile.xml":/etc/fastrtps_no_shm.xml:ro \
     "$IMG"
