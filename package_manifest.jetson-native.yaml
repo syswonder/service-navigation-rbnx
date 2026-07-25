@@ -25,3 +25,4 @@ capabilities:
   - name: robonix/service/navigation/navigate
   - name: robonix/service/navigation/navigate/status
   - name: robonix/service/navigation/navigate/cancel
+  - name: robonix/service/navigation/set_speed

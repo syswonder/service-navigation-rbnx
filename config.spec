@@ -124,6 +124,33 @@ optional:
       Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
       The deployment config takes priority over the environment. Empty,
       relative, private, substituted, or malformed topic names fail startup.
+  dynamic_speed:
+    type: mapping
+    description: >-
+      Policy for runtime speed changes through
+      robonix/service/navigation/set_speed. Values are percentages of the
+      deployment-owned Nav2 controller maximum.
+    fields:
+      default_percentage:
+        type: number
+        default: 80
+        description: >-
+          Limit applied at startup and by reset. The default leaves headroom
+          for an initial faster command; set 100 for legacy startup behavior.
+      step_percentage:
+        type: number
+        default: 20
+        description: Percentage points added or removed by faster/slower.
+      min_percentage:
+        type: number
+        default: 20
+        description: Lowest limit accepted from slower or set.
+      topic:
+        type: string
+        default: /speed_limit
+        description: >-
+          Absolute ROS topic matching controller_server.speed_limit_topic.
+          Startup fails if Nav2 does not subscribe.
   guard_terminal_xy_m:
     type: number
     default: 0.45

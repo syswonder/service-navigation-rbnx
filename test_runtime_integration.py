@@ -126,6 +126,28 @@ class RuntimeIntegrationTest(unittest.TestCase):
         self.assertIn('"${ROBONIX_VELOCITY_OUTPUT_TOPIC+x}" == "x"', start)
         self.assertIn('"${VELOCITY_OUTPUT_ARGS[@]}"', start)
 
+    def test_dynamic_speed_uses_nav2_live_speed_limit_without_replacing_goal(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        manifests = [
+            (ROOT / name).read_text()
+            for name in (
+                "package_manifest.yaml",
+                "package_manifest.jetson-docker.yaml",
+                "package_manifest.jetson-native.yaml",
+            )
+        ]
+
+        self.assertIn("from nav2_msgs.msg import SpeedLimit", source)
+        self.assertIn(
+            "node.create_publisher(\n            _SpeedLimit, _speed_settings.topic, 10",
+            source,
+        )
+        self.assertIn("def _set_speed_impl(operation: str, percentage: float)", source)
+        self.assertIn("_publish_speed_limit(decision.percentage)", source)
+        self.assertNotIn("_nav_queue.put", source[source.index("def _set_speed_impl"):])
+        for manifest in manifests:
+            self.assertIn("robonix/service/navigation/set_speed", manifest)
+
     def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))

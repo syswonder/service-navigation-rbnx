@@ -16,6 +16,7 @@
 #   service/navigation/navigate  mode=rpc  transport=gRPC+MCP  Navigate(PoseStamped)
 #   service/navigation/navigate/status    mode=rpc  transport=gRPC+MCP  GetNavigationStatus(run_id)
 #   service/navigation/navigate/cancel    mode=rpc  transport=gRPC+MCP  CancelNavigation(run_id)
+#   service/navigation/set_speed          mode=rpc  transport=gRPC+MCP  SetNavigationSpeed(operation)
 #
 # Config is documented in config.spec. params_file is required and is resolved
 # relative to the robot deployment manifest.
@@ -39,3 +40,4 @@ capabilities:
   - name: robonix/service/navigation/navigate
   - name: robonix/service/navigation/navigate/status
   - name: robonix/service/navigation/navigate/cancel
+  - name: robonix/service/navigation/set_speed

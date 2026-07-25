@@ -20,6 +20,10 @@ service:
         map: mapping
         odom: chassis
         scan: lidar
+      dynamic_speed:
+        default_percentage: 80
+        step_percentage: 20
+        min_percentage: 20
 ```
 
 Relative paths are resolved from the directory containing
@@ -56,6 +60,14 @@ Set `config.velocity_output_topic` to a fully-qualified non-motion sink such as
 config field is absent; an explicit empty, relative, or malformed topic fails
 startup before the guard creates any ROS endpoint.
 
+`robonix/service/navigation/set_speed` changes the active Nav2 Controller
+Server at runtime. It accepts `faster`, `slower`, `set`, and `reset`; no
+restart, goal cancellation, or goal resubmission occurs. Relative operations
+use `dynamic_speed.step_percentage`, explicit values are bounded by
+`min_percentage` and 100%, and `reset` restores `default_percentage`.
+The default 80% leaves one step of headroom in both directions. Set 100% in a
+deployment that must preserve the previous always-unlimited startup behavior.
+
 ## Runtime
 
 At `Driver(CMD_INIT)`, the wrapper:
@@ -64,7 +76,8 @@ At `Driver(CMD_INIT)`, the wrapper:
 2. resolves and materializes the deployment-owned Nav2 YAML;
 3. starts an optional PointCloud2-to-LaserScan adapter;
 4. starts Nav2 and waits for the `navigate_to_pose` action server;
-5. exposes navigate, status, and cancel capabilities.
+5. connects to Nav2's live `speed_limit` subscriber;
+6. exposes navigate, status, cancel, and dynamic speed capabilities.
 
 Missing required providers return `deferred`. Invalid config or a Nav2 startup
 failure returns `error` and tears down every child process.
@@ -84,7 +97,8 @@ python3 -m unittest -v \
   test_configuration.py \
   test_runtime_integration.py \
   test_rotation_guard.py \
-  test_scan_filter.py
+  test_scan_filter.py \
+  test_speed_control.py
 ```
 
 Jetson native builds require ROS 2 Humble and Nav2 packages compatible with the

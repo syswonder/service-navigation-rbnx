@@ -47,7 +47,9 @@ from nav2_wrapper.configuration import (
     resolve_params_file,
     resolve_velocity_output_topic,
     scan_projection_config,
+    validate_absolute_ros_topic,
 )
+from nav2_wrapper.speed_control import SpeedSettings, decide_speed, speed_settings
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -94,6 +96,8 @@ from navigation_mcp import (  # noqa: E402
     GetNavigationStatus_Response as McpStatusResponse,
     CancelNavigation_Request as McpCancelRequest,
     CancelNavigation_Response as McpCancelResponse,
+    SetNavigationSpeed_Request as McpSetSpeedRequest,
+    SetNavigationSpeed_Response as McpSetSpeedResponse,
 )
 
 # Current Robonix provider API (same one mapping_rbnx uses). The Service
@@ -128,11 +132,16 @@ _nav_action_ready = False
 _NavigateToPose = None
 _PoseStamped = None
 _GoalStatus = None
+_SpeedLimit = None
 _nav_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 _goal_states: dict[str, dict] = {}
 _goal_handles: dict[str, object] = {}
 _nav_diagnostics: deque[str] = deque(maxlen=12)
 _last_run_id = ""
+_speed_publisher = None
+_speed_lock = threading.Lock()
+_speed_settings = SpeedSettings()
+_speed_percentage = _speed_settings.default_percentage
 # Whether nav2 (and therefore the TF tree it consumes) runs on /clock sim
 # time. The wrapper's own rclpy node must match: it stamps goal poses with
 # node.get_clock().now(), and if that clock is wall time while map->odom TF
@@ -142,9 +151,10 @@ _USE_SIM_TIME = False
 
 
 def _import_ros2() -> None:
-    global _NavigateToPose, _PoseStamped, _GoalStatus
+    global _NavigateToPose, _PoseStamped, _GoalStatus, _SpeedLimit
     from geometry_msgs.msg import PoseStamped as RosPoseStamped  # type: ignore
     from nav2_msgs.action import NavigateToPose  # type: ignore
+    from nav2_msgs.msg import SpeedLimit  # type: ignore
     try:
         from action_msgs.msg import GoalStatus  # type: ignore
         _GoalStatus = GoalStatus
@@ -152,6 +162,7 @@ def _import_ros2() -> None:
         _GoalStatus = None
     _PoseStamped = RosPoseStamped
     _NavigateToPose = NavigateToPose
+    _SpeedLimit = SpeedLimit
 
 
 # ── atlas-driven dependency discovery ────────────────────────────────────────
@@ -615,10 +626,36 @@ def _kill_nav2() -> None:
 
 
 # ── ROS2 wiring (started after nav2 is alive) ────────────────────────────────
+def _publish_speed_limit(percentage: float | None = None) -> None:
+    """Publish the current limit directly to Nav2's live controller server."""
+    publisher = _speed_publisher
+    node = _ros_node
+    if publisher is None or node is None or _SpeedLimit is None:
+        raise RuntimeError("navigation speed publisher is not initialized")
+    if percentage is None:
+        with _speed_lock:
+            percentage = _speed_percentage
+    message = _SpeedLimit()
+    message.header.stamp = node.get_clock().now().to_msg()
+    message.percentage = True
+    message.speed_limit = float(percentage)
+    publisher.publish(message)
+
+
+def _republish_speed_limit() -> None:
+    """Refresh the live limit so a restarted Nav2 controller converges again."""
+    if _speed_publisher is None or _speed_publisher.get_subscription_count() == 0:
+        return
+    try:
+        _publish_speed_limit()
+    except Exception as error:  # noqa: BLE001
+        log.warning("speed-limit refresh failed: %s", error)
+
+
 def _start_ros2_thread() -> None:
     """Spin a rclpy node + ActionClient. Re-entrant: only acts once."""
     def _run():
-        global _ros_node, _nav_action_client, _nav_action_ready
+        global _ros_node, _nav_action_client, _nav_action_ready, _speed_publisher
         import rclpy  # type: ignore
         from rclpy.executors import MultiThreadedExecutor  # type: ignore
         from rclpy.action import ActionClient  # type: ignore
@@ -637,9 +674,15 @@ def _start_ros2_thread() -> None:
         _ros_node = node
         _import_ros2()
         _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
+        _speed_publisher = node.create_publisher(
+            _SpeedLimit, _speed_settings.topic, 10
+        )
+        node.create_timer(1.0, _republish_speed_limit)
         executor = MultiThreadedExecutor()
         executor.add_node(node)
-        log.info("rclpy node up; waiting on navigate_to_pose action server")
+        log.info(
+            "rclpy node up; waiting on navigate_to_pose and speed-limit subscriber"
+        )
         while rclpy.ok():
             executor.spin_once(timeout_sec=0.05)
             # Drain goals queued by Navigate gRPC handler.
@@ -661,6 +704,18 @@ def _wait_for_action(timeout_s: float) -> bool:
             _nav_action_ready = True
             return True
         time.sleep(0.5)
+    return False
+
+
+def _wait_for_speed_subscriber(timeout_s: float) -> bool:
+    """Wait until Controller Server is subscribed, then apply the default."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        publisher = _speed_publisher
+        if publisher is not None and publisher.get_subscription_count() > 0:
+            _publish_speed_limit()
+            return True
+        time.sleep(0.1)
     return False
 
 
@@ -891,7 +946,7 @@ def init(cfg: dict):
     The navigate/status/cancel gRPC and MCP interfaces are hosted + declared by
     run() (see attach_grpc_servicer below); each guards on `_ros_node`, so
     a call landing before nav2 is ready returns a clean 'not initialized'."""
-    global _initialized
+    global _initialized, _speed_settings, _speed_percentage
     with _state_lock:
         if _initialized:
             return Ok()
@@ -903,6 +958,15 @@ def init(cfg: dict):
         resolve_velocity_output_topic(cfg)
     except (TypeError, ValueError) as error:
         return Err(f"invalid velocity_output_topic: {error}")
+    try:
+        settings = speed_settings(cfg)
+        validate_absolute_ros_topic(settings.topic, "dynamic_speed.topic")
+    except (TypeError, ValueError) as error:
+        return Err(f"invalid dynamic_speed config: {error}")
+
+    with _speed_lock:
+        _speed_settings = settings
+        _speed_percentage = settings.default_percentage
 
     action_wait = float(cfg.get("action_wait_s", 45.0))
 
@@ -930,10 +994,26 @@ def init(cfg: dict):
         return Err(
             f"navigate_to_pose action server did not come up within {action_wait:.1f}s"
         )
+    speed_wait = min(action_wait, 10.0)
+    try:
+        speed_ready = _wait_for_speed_subscriber(speed_wait)
+    except Exception as error:  # noqa: BLE001
+        _kill_nav2()
+        return Err(f"failed to apply initial navigation speed: {error}")
+    if not speed_ready:
+        _kill_nav2()
+        return Err(
+            "Nav2 controller did not subscribe to "
+            f"{_speed_settings.topic} within {speed_wait:.1f}s"
+        )
 
     with _state_lock:
         _initialized = True
-    log.info("init complete: nav2 alive, navigate/status/cancel serving")
+    log.info(
+        "init complete: nav2 alive, navigate/status/cancel/set_speed serving "
+        "(speed=%.1f%%)",
+        _speed_percentage,
+    )
     return Ok()
 
 
@@ -1011,6 +1091,52 @@ def _cancel_impl(run_id: str) -> dict:
     return {"accepted": accepted, "detail": detail}
 
 
+def _set_speed_impl(operation: str, percentage: float) -> dict:
+    """Apply a relative or explicit limit to the live Nav2 controller."""
+    publisher = _speed_publisher
+    if not _initialized or publisher is None:
+        return {
+            "ok": False,
+            "changed": False,
+            "effective_percentage": 0.0,
+            "detail": "navigation is not initialized",
+        }
+    if publisher.get_subscription_count() == 0:
+        return {
+            "ok": False,
+            "changed": False,
+            "effective_percentage": 0.0,
+            "detail": "Nav2 speed-limit subscriber is unavailable",
+        }
+    try:
+        global _speed_percentage
+        with _speed_lock:
+            decision = decide_speed(
+                _speed_percentage, operation, percentage, _speed_settings
+            )
+            _publish_speed_limit(decision.percentage)
+            _speed_percentage = decision.percentage
+    except Exception as error:  # noqa: BLE001
+        return {
+            "ok": False,
+            "changed": False,
+            "effective_percentage": _speed_percentage,
+            "detail": str(error),
+        }
+    log.info(
+        "dynamic navigation speed operation=%s requested=%s effective=%.1f%%",
+        operation,
+        percentage,
+        decision.percentage,
+    )
+    return {
+        "ok": True,
+        "changed": decision.changed,
+        "effective_percentage": decision.percentage,
+        "detail": decision.detail,
+    }
+
+
 # ── gRPC servicers ───────────────────────────────────────────────────────────
 class _NavigateServicer(contracts_grpc.RobonixServiceNavigationNavigateServicer):
     def Navigate(self, request, context):
@@ -1028,6 +1154,14 @@ class _CancelServicer(contracts_grpc.RobonixServiceNavigationNavigateCancelServi
     def CancelNavigation(self, request, context):
         out = _cancel_impl(request.run_id)
         return navigation_pb2.CancelNavigation_Response(**out)
+
+
+class _SetSpeedServicer(
+    contracts_grpc.RobonixServiceNavigationSetSpeedServicer
+):
+    def SetNavigationSpeed(self, request, context):
+        out = _set_speed_impl(request.operation, request.percentage)
+        return navigation_pb2.SetNavigationSpeed_Response(**out)
 
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
@@ -1058,6 +1192,19 @@ def cancel(req: McpCancelRequest) -> McpCancelResponse:
     return McpCancelResponse(**out)
 
 
+@nav.mcp("robonix/service/navigation/set_speed")
+def set_speed(req: McpSetSpeedRequest) -> McpSetSpeedResponse:
+    """Change speed during a navigation run without replacing its goal.
+
+    operation is faster, slower, set, or reset. percentage is used only by
+    set and means a percentage of the deployment-owned Nav2 maximum.
+    """
+    out = _set_speed_impl(req.operation, req.percentage)
+    if not out["ok"]:
+        raise RuntimeError(out["detail"])
+    return McpSetSpeedResponse(**out)
+
+
 # ── attach the navigate/status/cancel gRPC servicers ─────────────────────────
 # run() hosts these on the same auto-allocated port as the Driver lifecycle
 # and atlas-declares each by contract. They're live from bootstrap; each one
@@ -1066,6 +1213,9 @@ def cancel(req: McpCancelRequest) -> McpCancelResponse:
 nav.attach_grpc_servicer("robonix/service/navigation/navigate", _NavigateServicer())
 nav.attach_grpc_servicer("robonix/service/navigation/navigate/status", _StatusServicer())
 nav.attach_grpc_servicer("robonix/service/navigation/navigate/cancel", _CancelServicer())
+nav.attach_grpc_servicer(
+    "robonix/service/navigation/set_speed", _SetSpeedServicer()
+)
 
 
 def main() -> int:
