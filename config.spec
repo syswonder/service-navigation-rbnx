@@ -92,12 +92,28 @@ optional:
       Custom BehaviorTree XML used when params_file contains the
       __ROBONIX_BT_XML__ token.
 
+  bt_through_poses_xml_file:
+    type: path
+    path_base: directory containing robonix_manifest.yaml
+    description: >-
+      Custom NavigateThroughPoses BehaviorTree XML used when params_file
+      contains the __ROBONIX_BT_THROUGH_POSES_XML__ token. This prevents an
+      otherwise implicit fallback to Nav2's distro recovery tree.
+
   use_sim_time:
     type: boolean
     default: false
     description: >-
       Use ROS /clock for Nav2, the wrapper, and action timing. Enable this only
       when the complete simulator TF and sensor graph uses simulated time.
+  use_composition:
+    type: boolean
+    default: false
+    description: >-
+      Load Nav2 managed nodes into one provider-owned isolated component
+      container. The container remains in the same launch process group so
+      provider shutdown cleans up the container and every loaded component. This is
+      opt-in because it changes the Nav2 process fault domain.
   action_wait_s:
     type: number
     default: 45.0
@@ -175,11 +191,11 @@ optional:
     description: Advanced direct ROS topic override; provider_ids is preferred.
   trajectory_log_dir:
     type: path
-    default: rbnx-build/data/trajectories
     description: >-
       Directory for per-goal JSONL trajectories and scan anomaly records.
-      Use an absolute path when traces must live outside the package build
-      directory.
+      When omitted, traces use a process-private runtime directory and are
+      removed with that provider process. Configure a path explicitly only
+      when traces must persist after shutdown.
   velocity_output_topic:
     type: string
     default: /cmd_vel
@@ -189,6 +205,14 @@ optional:
       Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
       The deployment config takes priority over the environment. Empty,
       relative, private, substituted, or malformed topic names fail startup.
+  external_velocity_guard:
+    type: boolean
+    default: false
+    description: >-
+      Disable the provider-owned final velocity guard and route only
+      velocity_smoother to /cmd_vel_guard_input for a deployment-owned guard.
+      The behavior server is isolated on an unsubscribed sink. This mode
+      requires velocity_output_topic=/cmd_vel_guard_input and defaults off.
   guard_terminal_xy_m:
     type: number
     default: 0.45

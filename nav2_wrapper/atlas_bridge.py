@@ -20,7 +20,9 @@ status() / cancel() work even after the goal has terminated.
 Config (passed via Driver(CMD_INIT, config_json)):
     params_file      required; absolute or relative to the robot manifest
     bt_xml_file      optional; absolute or relative to the robot manifest
+    bt_through_poses_xml_file optional; deploy-owned NavigateThroughPoses tree
     use_sim_time     default false
+    use_composition  default false       — opt-in owned component container
     action_wait_s    default 45.0       — nav2 lifecycle takes a while
 """
 from __future__ import annotations
@@ -33,6 +35,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -43,8 +46,13 @@ import grpc
 
 from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
 from nav2_wrapper.configuration import (
+    render_python_expression_bool,
     resolve_bt_xml_file,
+    resolve_bt_through_poses_xml_file,
+    resolve_external_velocity_guard,
     resolve_params_file,
+    resolve_trajectory_log_dir,
+    resolve_use_composition,
     resolve_velocity_output_topic,
     scan_projection_config,
     validate_absolute_ros_topic,
@@ -56,6 +64,7 @@ from nav2_wrapper.speed_control import (
     decide_explicit,
     speed_settings,
 )
+from nav2_wrapper.guarded_launch import patch_navigation_launch
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -127,12 +136,13 @@ nav = Service(id=CAP_ID, namespace=NAMESPACE)
 # ── shared state ─────────────────────────────────────────────────────────────
 _state_lock = threading.Lock()
 _cap_id: str = CAP_ID
-_pkg_root: Path = Path(__file__).resolve().parent.parent
 _nav2_proc: subprocess.Popen | None = None
+_nav2_pgid: int | None = None
 _velocity_guard_proc: subprocess.Popen | None = None
 _scan_projector_proc: subprocess.Popen | None = None
 _scan_deskew_proc: subprocess.Popen | None = None
 _scan_filter_proc: subprocess.Popen | None = None
+_runtime_tmp: tempfile.TemporaryDirectory | None = None
 _initialized = False
 
 # ROS2 client state (initialized inside Driver.Init after nav2 is alive)
@@ -164,6 +174,26 @@ _speed_subscriber_connected = False
 # is published on sim time, every goal lookup hits a ~decades extrapolation
 # error and the planner aborts. Set from cfg in init().
 _USE_SIM_TIME = False
+
+
+def _runtime_directory() -> Path:
+    """Return this bridge process' private directory for generated files.
+
+    Docker normally runs the provider as root while the native launcher runs
+    it as the invoking user.  Keeping generated params below the package's
+    shared ``rbnx-build/runtime`` directory therefore leaves root-owned files
+    which a later native process cannot replace.  A process-private temporary
+    directory also prevents concurrent capability instances from overwriting
+    one another's launch inputs.
+    """
+    global _runtime_tmp
+    if _runtime_tmp is None:
+        safe_cap_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", _cap_id).strip("-") or "nav2"
+        _runtime_tmp = tempfile.TemporaryDirectory(
+            prefix=f"robonix-navigation-{safe_cap_id}-"
+        )
+        log.info("using private generated runtime directory %s", _runtime_tmp.name)
+    return Path(_runtime_tmp.name)
 
 
 def _import_ros2() -> None:
@@ -490,12 +520,16 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
             resolved[key] = value
 
     bt_xml = resolve_bt_xml_file(cfg)
+    bt_through_poses_xml = resolve_bt_through_poses_xml_file(cfg)
     replacements = {
         "__ROBONIX_MAP_TOPIC__": resolved.get("map", ""),
         "__ROBONIX_ODOM_TOPIC__": resolved.get("odom", ""),
         "__ROBONIX_SCAN_TOPIC__": resolved.get("scan", ""),
         "__ROBONIX_SCAN_CLOUD_TOPIC__": resolved.get("scan_cloud", ""),
         "__ROBONIX_BT_XML__": str(bt_xml) if bt_xml else "",
+        "__ROBONIX_BT_THROUGH_POSES_XML__": (
+            str(bt_through_poses_xml) if bt_through_poses_xml else ""
+        ),
     }
     if "__ROBONIX_FOOTPRINT__" in text:
         replacements["__ROBONIX_FOOTPRINT__"] = _soma_footprint()
@@ -512,8 +546,7 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
             f"cannot materialize {source.name}: unresolved tokens {unresolved}"
         )
 
-    runtime_dir = _pkg_root / "rbnx-build" / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir = _runtime_directory()
     target = runtime_dir / f"nav2_params_{_cap_id}.yaml"
     target.write_text(text, encoding="utf-8")
     log.info("materialized nav2 params %s -> %s", source, target)
@@ -522,34 +555,16 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     return str(target), []
 
 
-def _materialize_guarded_launch() -> str:
+def _materialize_guarded_launch(*, external_velocity_guard: bool) -> str:
     """Patch the distro launch so every Nav2 velocity crosses our final guard."""
     from ament_index_python.packages import get_package_share_directory  # type: ignore
 
     source = Path(get_package_share_directory("nav2_bringup")) / "launch" / "navigation_launch.py"
-    text = source.read_text(encoding="utf-8")
-    old_behavior = "remappings=remappings)"
-    behavior_marker = "package='nav2_behaviors'"
-    search_from = 0
-    for _ in range(2):
-        behavior_start = text.index(behavior_marker, search_from)
-        behavior_end = text.index("package='nav2_bt_navigator'", behavior_start)
-        behavior = text[behavior_start:behavior_end]
-        if behavior.count(old_behavior) != 1:
-            raise RuntimeError("unsupported nav2 behavior_server launch layout")
-        behavior = behavior.replace(
-            old_behavior,
-            "remappings=remappings + [('cmd_vel', 'cmd_vel_guard_input')])",
-        )
-        text = text[:behavior_start] + behavior + text[behavior_end:]
-        search_from = behavior_end
-    old_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')])"
-    new_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel_guard_input')])"
-    if text.count(old_smoother) != 2:
-        raise RuntimeError("unsupported nav2 velocity_smoother launch layout")
-    text = text.replace(old_smoother, new_smoother)
-    target = _pkg_root / "rbnx-build" / "runtime" / "guarded_navigation_launch.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
+    text = patch_navigation_launch(
+        source.read_text(encoding="utf-8"),
+        external_velocity_guard=external_velocity_guard,
+    )
+    target = _runtime_directory() / "guarded_navigation_launch.py"
     target.write_text(text, encoding="utf-8")
     return str(target)
 
@@ -560,6 +575,7 @@ def _spawn_velocity_guard(cfg: dict) -> None:
     settings = _speed_settings
     if settings is None:
         raise RuntimeError("dynamic speed settings are not initialized")
+    trace_dir = resolve_trajectory_log_dir(cfg, _runtime_directory())
     env = os.environ.copy()
     env.update({
         # Always pass a validated, fully-qualified topic explicitly.  This
@@ -574,9 +590,7 @@ def _spawn_velocity_guard(cfg: dict) -> None:
             settings.default_percentage
         ),
         "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC": _GUARD_SPEED_LIMIT_TOPIC,
-        "ROBONIX_NAV_TRACE_DIR": str(
-            cfg.get("trajectory_log_dir", _pkg_root / "rbnx-build" / "data" / "trajectories")
-        ),
+        "ROBONIX_NAV_TRACE_DIR": str(trace_dir),
         "ROBONIX_GUARD_TERMINAL_XY_M": str(cfg.get("guard_terminal_xy_m", 0.45)),
         "ROBONIX_GUARD_TERMINAL_TIMEOUT_S": str(cfg.get("guard_terminal_timeout_s", 15.0)),
         "ROBONIX_GUARD_NO_PROGRESS_S": str(cfg.get("guard_no_progress_s", 3.0)),
@@ -596,14 +610,25 @@ def _spawn_velocity_guard(cfg: dict) -> None:
 
 
 def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
-    global _nav2_proc
+    global _nav2_proc, _nav2_pgid
+    use_composition = resolve_use_composition(cfg)
+    external_velocity_guard = resolve_external_velocity_guard(cfg)
     params_file, launch_remaps = _materialize_params(cfg, remap_args)
-    _spawn_velocity_guard(cfg)
-    launch_file = _materialize_guarded_launch()
+    launch_file = _materialize_guarded_launch(
+        external_velocity_guard=external_velocity_guard
+    )
+    # Materialize and validate every launch input before creating a child.
+    # An unsupported distro launch must not leave a guard process behind.
+    if not external_velocity_guard:
+        _spawn_velocity_guard(cfg)
     use_sim_time = "true" if cfg.get("use_sim_time", False) else "false"
+    composition = render_python_expression_bool(use_composition)
+    container_name = f"robonix_navigation_{os.getpid()}"
     args = [
         "ros2", "launch", launch_file,
         f"use_sim_time:={use_sim_time}",
+        f"use_composition:={composition}",
+        f"container_name:={container_name}",
         f"params_file:={params_file}",
     ]
     # Topic remaps from atlas resolution arrive as launch-arg-shaped
@@ -613,29 +638,55 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     # rewrite the params YAML with substitutions for nodes that read
     # topic names from params rather than via remap.)
     args.extend(launch_remaps)
-    log.info("spawning nav2 (params=%s, remaps=%s)", params_file, launch_remaps)
-    _nav2_proc = subprocess.Popen(
+    log.info(
+        "spawning nav2 (params=%s, remaps=%s, composition=%s, container=%s)",
+        params_file,
+        launch_remaps,
+        use_composition,
+        container_name,
+    )
+    proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    threading.Thread(target=_pump_output, args=(_nav2_proc.stdout, "nav2"),
+    # start_new_session makes the child PID the stable process-group ID. Keep
+    # it separately because the ros2-launch leader can exit before a loaded
+    # component container; cleanup must still target the remaining group.
+    _nav2_proc = proc
+    _nav2_pgid = proc.pid
+    threading.Thread(target=_pump_output, args=(proc.stdout, "nav2"),
                      daemon=True).start()
 
 
 def _kill_nav2() -> None:
-    global _velocity_guard_proc
+    global _nav2_proc, _nav2_pgid, _velocity_guard_proc
     _kill_scan_projector()
     p = _nav2_proc
-    if p is not None and p.poll() is None:
+    pgid = _nav2_pgid
+    _nav2_proc = None
+    _nav2_pgid = None
+    if pgid is not None:
         try:
-            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        try:
-            p.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
+        deadline = time.monotonic() + 5.0
+        if p is not None and p.poll() is None:
             try:
-                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+        # The leader may already be gone while a component container remains
+        # in its process group. Wait for the whole group, then escalate.
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
     guard = _velocity_guard_proc
@@ -1070,6 +1121,14 @@ def init(cfg: dict):
         validate_absolute_ros_topic(settings.topic, "dynamic_speed.topic")
     except (TypeError, ValueError) as error:
         return Err(f"invalid dynamic_speed config: {error}")
+    try:
+        resolve_external_velocity_guard(cfg)
+    except (TypeError, ValueError) as error:
+        return Err(f"invalid external_velocity_guard: {error}")
+    try:
+        resolve_use_composition(cfg)
+    except (TypeError, ValueError) as error:
+        return Err(f"invalid use_composition: {error}")
 
     with _speed_lock:
         _speed_settings = settings

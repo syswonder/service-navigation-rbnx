@@ -21,6 +21,49 @@ LEGACY_PROFILE_FILES = {
 
 VELOCITY_OUTPUT_TOPIC_ENV = "ROBONIX_VELOCITY_OUTPUT_TOPIC"
 DEFAULT_VELOCITY_OUTPUT_TOPIC = "/cmd_vel"
+EXTERNAL_VELOCITY_GUARD_INPUT_TOPIC = "/cmd_vel_guard_input"
+
+
+def resolve_use_composition(cfg: dict) -> bool:
+    """Return the explicit composition choice without truthy coercion."""
+    value = cfg.get("use_composition", False)
+    if not isinstance(value, bool):
+        raise ValueError("use_composition must be a boolean")
+    return value
+
+
+def resolve_external_velocity_guard(cfg: dict) -> bool:
+    """Select a deployment-owned final guard without weakening defaults.
+
+    The historical provider-owned velocity guard remains the default.  An
+    external guard is opt-in and must consume the one exact private input
+    topic; accepting an arbitrary destination here could bypass that guard.
+    """
+    value = cfg.get("external_velocity_guard", False)
+    if not isinstance(value, bool):
+        raise ValueError("external_velocity_guard must be a boolean")
+    if (
+        value
+        and resolve_velocity_output_topic(cfg)
+        != EXTERNAL_VELOCITY_GUARD_INPUT_TOPIC
+    ):
+        raise ValueError(
+            "external_velocity_guard requires velocity_output_topic "
+            f"{EXTERNAL_VELOCITY_GUARD_INPUT_TOPIC!r}"
+        )
+    return value
+
+
+def render_python_expression_bool(value: bool) -> str:
+    """Render a bool as a Python literal for ROS launch PythonExpression.
+
+    Nav2 Humble evaluates ``use_composition`` in a ``PythonExpression``.  Its
+    usual lower-case ROS boolean spelling would therefore be parsed as an
+    undefined Python name instead of a boolean literal.
+    """
+    if not isinstance(value, bool):
+        raise ValueError("launch PythonExpression value must be a boolean")
+    return "True" if value else "False"
 
 
 def deployment_root() -> Path:
@@ -75,6 +118,37 @@ def resolve_bt_xml_file(cfg: dict) -> Path | None:
         )
         return (LEGACY_ROOT / "ranger_mini_v3_navigate.xml").resolve()
     return None
+
+
+def resolve_bt_through_poses_xml_file(cfg: dict) -> Path | None:
+    """Resolve the optional deploy-owned NavigateThroughPoses tree.
+
+    Nav2 Humble starts both navigator plugins during lifecycle configure. A
+    deployment which only overrides ``default_nav_to_pose_bt_xml`` otherwise
+    still loads the distro NavigateThroughPoses tree, including recovery
+    actions which may intentionally be absent from the robot behavior server.
+    """
+    raw = cfg.get("bt_through_poses_xml_file")
+    if raw:
+        return resolve_deployment_file(raw, "bt_through_poses_xml_file")
+    return None
+
+
+def resolve_trajectory_log_dir(cfg: dict, runtime_directory: Path) -> Path:
+    """Resolve the velocity guard's trace directory.
+
+    Trace files are runtime output, not package build artifacts.  When the
+    deployment does not request a persistent location, keep them below the
+    provider process' private runtime directory so Docker/root and native/user
+    launches cannot leave mutually unwritable files in the source tree.
+    """
+    configured = cfg.get("trajectory_log_dir")
+    if configured is None:
+        return runtime_directory / "trajectories"
+    raw = str(configured).strip()
+    if not raw:
+        raise ValueError("trajectory_log_dir must not be empty")
+    return Path(raw).expanduser()
 
 
 def validate_absolute_ros_topic(value: object, field: str) -> str:

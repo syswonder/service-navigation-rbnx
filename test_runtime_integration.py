@@ -111,16 +111,27 @@ class RuntimeIntegrationTest(unittest.TestCase):
         self.assertIn('"scan:=/scanner/scan_raw"', source)
         self.assertIn('"-m", "nav2_wrapper.scan_filter"', source)
 
+    def test_both_nav2_navigators_accept_deploy_owned_trees(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        self.assertIn("resolve_bt_xml_file(cfg)", source)
+        self.assertIn("resolve_bt_through_poses_xml_file(cfg)", source)
+        self.assertIn('"__ROBONIX_BT_XML__"', source)
+        self.assertIn('"__ROBONIX_BT_THROUGH_POSES_XML__"', source)
+
     def test_final_velocity_guard_owns_cmd_vel(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        patcher = (ROOT / "nav2_wrapper" / "guarded_launch.py").read_text()
         guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
-        self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", source)
-        self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", source)
+        self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", patcher)
+        self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", patcher)
         self.assertIn('"-m", "nav2_wrapper.velocity_guard"', source)
         self.assertIn('output_topic = resolve_velocity_output_topic(cfg)', source)
         self.assertIn('"ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic', source)
         self.assertIn('output_topic = resolve_velocity_output_topic({})', guard)
         self.assertIn('create_publisher(Twist, output_topic, 10)', guard)
+        self.assertIn('ROBONIX_GUARD_COMMAND_TIMEOUT_S", "0.15"', guard)
+        self.assertIn("self._last_cmd_at = time.monotonic()", guard)
+        self.assertIn("if self.guard.latched_reason or command_stale:", guard)
         self.assertNotIn('create_publisher(Twist, "/cmd_vel"', guard)
         start = (ROOT / "scripts" / "start.sh").read_text()
         self.assertIn('"${ROBONIX_VELOCITY_OUTPUT_TOPIC+x}" == "x"', start)
@@ -172,12 +183,78 @@ class RuntimeIntegrationTest(unittest.TestCase):
                 manifest,
             )
 
+    def test_external_guard_disables_inner_guard_and_isolates_behaviors(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        patcher = (ROOT / "nav2_wrapper" / "guarded_launch.py").read_text()
+        config = (ROOT / "nav2_wrapper" / "configuration.py").read_text()
+        self.assertIn(
+            "external_velocity_guard = resolve_external_velocity_guard(cfg)",
+            source,
+        )
+        self.assertIn(
+            "if not external_velocity_guard:\n"
+            "        _spawn_velocity_guard(cfg)",
+            source,
+        )
+        self.assertIn(
+            "external_velocity_guard=external_velocity_guard",
+            source,
+        )
+        self.assertIn(
+            "/robonix/staged_nav2/behavior_cmd_vel_forbidden",
+            patcher,
+        )
+        self.assertIn(
+            'EXTERNAL_VELOCITY_GUARD_INPUT_TOPIC = "/cmd_vel_guard_input"',
+            config,
+        )
+        self.assertIn(
+            "external_velocity_guard requires velocity_output_topic",
+            config,
+        )
+
+    def test_composition_is_owned_opt_in_and_materialized_before_children(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        patcher = (ROOT / "nav2_wrapper" / "guarded_launch.py").read_text()
+        spec = (ROOT / "config.spec").read_text()
+        self.assertIn("resolve_use_composition(cfg)", source)
+        self.assertIn(
+            "composition = render_python_expression_bool(use_composition)", source
+        )
+        self.assertNotIn('composition = "true" if', source)
+        self.assertNotIn('composition = "false" if', source)
+        self.assertIn('f"use_composition:={composition}"', source)
+        self.assertIn('f"container_name:={container_name}"', source)
+        self.assertLess(
+            source.index(
+                "launch_file = _materialize_guarded_launch(\n"
+                "        external_velocity_guard=external_velocity_guard"
+            ),
+            source.index("_spawn_velocity_guard(cfg)", source.index("def _spawn_nav2")),
+        )
+        self.assertIn("executable='component_container_isolated'", patcher)
+        self.assertIn("condition=IfCondition(use_composition)", patcher)
+        self.assertIn("namespace=namespace", patcher)
+        self.assertIn("name=container_name", patcher)
+        self.assertIn('"    ld.add_action(robonix_nav2_container)\\n"', patcher)
+        self.assertIn("use_composition:", spec)
+        self.assertIn("default: false", spec)
+
     def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))
         discovery = source.index("_build_remap_args(cfg)", source.index("def init"))
         self.assertLess(validation, discovery)
         self.assertIn('return Err(f"invalid velocity_output_topic: {error}")', source)
+
+    def test_invalid_composition_is_rejected_before_dependency_discovery(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        validation = source.index(
+            "resolve_use_composition(cfg)", source.index("def init")
+        )
+        discovery = source.index("_build_remap_args(cfg)", source.index("def init"))
+        self.assertLess(validation, discovery)
+        self.assertIn('return Err(f"invalid use_composition: {error}")', source)
 
     def test_failed_init_cleans_up_nav_children(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
@@ -186,6 +263,39 @@ class RuntimeIntegrationTest(unittest.TestCase):
             '        return Err(f"spawn nav2 failed: {e}")',
             source,
         )
+
+    def test_cleanup_keeps_pgid_after_launch_leader_exit(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        cleanup = source[
+            source.index("def _kill_nav2") : source.index(
+                "# ── ROS2 wiring", source.index("def _kill_nav2")
+            )
+        ]
+        self.assertIn("pgid = _nav2_pgid", cleanup)
+        self.assertIn("_nav2_pgid = None", cleanup)
+        self.assertIn("os.killpg(pgid, signal.SIGTERM)", cleanup)
+        self.assertIn("os.killpg(pgid, signal.SIGKILL)", cleanup)
+        self.assertNotIn("os.getpgid(p.pid)", cleanup)
+
+    def test_generated_runtime_is_process_private_across_docker_and_native(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        spec = (ROOT / "config.spec").read_text()
+        self.assertIn("tempfile.TemporaryDirectory(", source)
+        self.assertIn("runtime_dir = _runtime_directory()", source)
+        self.assertIn(
+            'target = _runtime_directory() / "guarded_navigation_launch.py"',
+            source,
+        )
+        self.assertIn(
+            "trace_dir = resolve_trajectory_log_dir(cfg, _runtime_directory())",
+            source,
+        )
+        self.assertIn('"ROBONIX_NAV_TRACE_DIR": str(trace_dir)', source)
+        self.assertNotIn('_pkg_root / "rbnx-build" / "runtime"', source)
+        self.assertNotIn(
+            '_pkg_root / "rbnx-build" / "data" / "trajectories"', source
+        )
+        self.assertNotIn("default: rbnx-build/data/trajectories", spec)
 
     def test_cancel_is_latched_before_action_handle_exists(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
