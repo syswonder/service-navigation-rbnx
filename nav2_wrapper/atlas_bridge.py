@@ -49,7 +49,13 @@ from nav2_wrapper.configuration import (
     scan_projection_config,
     validate_absolute_ros_topic,
 )
-from nav2_wrapper.speed_control import SpeedSettings, decide_speed, speed_settings
+from nav2_wrapper.speed_control import (
+    SpeedDecision,
+    SpeedSettings,
+    decide_adjustment,
+    decide_explicit,
+    speed_settings,
+)
 
 logging.basicConfig(level=os.environ.get("NAV2_LOG_LEVEL", "INFO").upper(),
                     format="[nav2_wrapper] %(message)s")
@@ -96,8 +102,12 @@ from navigation_mcp import (  # noqa: E402
     GetNavigationStatus_Response as McpStatusResponse,
     CancelNavigation_Request as McpCancelRequest,
     CancelNavigation_Response as McpCancelResponse,
-    SetNavigationSpeed_Request as McpSetSpeedRequest,
-    SetNavigationSpeed_Response as McpSetSpeedResponse,
+    AdjustNavigationSpeed_Request as McpAdjustSpeedRequest,
+    AdjustNavigationSpeed_Response as McpAdjustSpeedResponse,
+    SetNavigationSpeedLimit_Request as McpSetSpeedLimitRequest,
+    SetNavigationSpeedLimit_Response as McpSetSpeedLimitResponse,
+    GetNavigationSpeedLimit_Request as McpGetSpeedLimitRequest,
+    GetNavigationSpeedLimit_Response as McpGetSpeedLimitResponse,
 )
 
 # Current Robonix provider API (same one mapping_rbnx uses). The Service
@@ -139,9 +149,15 @@ _goal_handles: dict[str, object] = {}
 _nav_diagnostics: deque[str] = deque(maxlen=12)
 _last_run_id = ""
 _speed_publisher = None
+_guard_speed_publisher = None
 _speed_lock = threading.Lock()
-_speed_settings = SpeedSettings()
-_speed_percentage = _speed_settings.default_percentage
+_speed_settings: SpeedSettings | None = None
+_speed_percentage = 100.0
+_session_speed_percentage = 100.0
+_speed_scope = "session"
+_speed_scope_run_id = ""
+_GUARD_SPEED_LIMIT_TOPIC = "/robonix/navigation/speed_limit_guard"
+_speed_subscriber_connected = False
 # Whether nav2 (and therefore the TF tree it consumes) runs on /clock sim
 # time. The wrapper's own rclpy node must match: it stamps goal poses with
 # node.get_clock().now(), and if that clock is wall time while map->odom TF
@@ -541,6 +557,9 @@ def _materialize_guarded_launch() -> str:
 def _spawn_velocity_guard(cfg: dict) -> None:
     global _velocity_guard_proc
     output_topic = resolve_velocity_output_topic(cfg)
+    settings = _speed_settings
+    if settings is None:
+        raise RuntimeError("dynamic speed settings are not initialized")
     env = os.environ.copy()
     env.update({
         # Always pass a validated, fully-qualified topic explicitly.  This
@@ -548,6 +567,11 @@ def _spawn_velocity_guard(cfg: dict) -> None:
         # deployments route guarded output to a non-motion sink until their
         # physical motion gate is deliberately enabled.
         "ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic,
+        "ROBONIX_NAV_MAX_SPEED_XY_MPS": str(settings.max_speed_xy_mps),
+        "ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE": str(
+            settings.default_percentage
+        ),
+        "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC": _GUARD_SPEED_LIMIT_TOPIC,
         "ROBONIX_NAV_TRACE_DIR": str(
             cfg.get("trajectory_log_dir", _pkg_root / "rbnx-build" / "data" / "trajectories")
         ),
@@ -627,10 +651,16 @@ def _kill_nav2() -> None:
 
 # ── ROS2 wiring (started after nav2 is alive) ────────────────────────────────
 def _publish_speed_limit(percentage: float | None = None) -> None:
-    """Publish the current limit directly to Nav2's live controller server."""
+    """Publish one limit to Nav2 and the independent final velocity guard."""
     publisher = _speed_publisher
+    guard_publisher = _guard_speed_publisher
     node = _ros_node
-    if publisher is None or node is None or _SpeedLimit is None:
+    if (
+        publisher is None
+        or guard_publisher is None
+        or node is None
+        or _SpeedLimit is None
+    ):
         raise RuntimeError("navigation speed publisher is not initialized")
     if percentage is None:
         with _speed_lock:
@@ -640,22 +670,42 @@ def _publish_speed_limit(percentage: float | None = None) -> None:
     message.percentage = True
     message.speed_limit = float(percentage)
     publisher.publish(message)
+    guard_publisher.publish(message)
 
 
-def _republish_speed_limit() -> None:
-    """Refresh the live limit so a restarted Nav2 controller converges again."""
-    if _speed_publisher is None or _speed_publisher.get_subscription_count() == 0:
+def _speed_channels_available() -> bool:
+    """Require both Nav2's controller and the final guard to receive limits."""
+    return bool(
+        _speed_publisher is not None
+        and _guard_speed_publisher is not None
+        and _speed_publisher.get_subscription_count() > 0
+        and _guard_speed_publisher.get_subscription_count() > 0
+    )
+
+
+def _refresh_speed_subscriber() -> None:
+    """Reapply once when Controller Server reconnects, never on every tick."""
+    global _speed_subscriber_connected
+    if _speed_publisher is None:
+        return
+    connected = _speed_publisher.get_subscription_count() > 0
+    if not connected:
+        _speed_subscriber_connected = False
+        return
+    if _speed_subscriber_connected:
         return
     try:
         _publish_speed_limit()
+        _speed_subscriber_connected = True
     except Exception as error:  # noqa: BLE001
-        log.warning("speed-limit refresh failed: %s", error)
+        log.warning("speed-limit reconnect refresh failed: %s", error)
 
 
 def _start_ros2_thread() -> None:
     """Spin a rclpy node + ActionClient. Re-entrant: only acts once."""
     def _run():
-        global _ros_node, _nav_action_client, _nav_action_ready, _speed_publisher
+        global _ros_node, _nav_action_client, _nav_action_ready
+        global _speed_publisher, _guard_speed_publisher
         import rclpy  # type: ignore
         from rclpy.executors import MultiThreadedExecutor  # type: ignore
         from rclpy.action import ActionClient  # type: ignore
@@ -673,11 +723,19 @@ def _start_ros2_thread() -> None:
         )
         _ros_node = node
         _import_ros2()
+        settings = _speed_settings
+        if settings is None:
+            raise RuntimeError("dynamic speed settings are not initialized")
         _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
         _speed_publisher = node.create_publisher(
-            _SpeedLimit, _speed_settings.topic, 10
+            _SpeedLimit, settings.topic, 10
         )
-        node.create_timer(1.0, _republish_speed_limit)
+        _guard_speed_publisher = node.create_publisher(
+            _SpeedLimit,
+            _GUARD_SPEED_LIMIT_TOPIC,
+            10,
+        )
+        node.create_timer(1.0, _refresh_speed_subscriber)
         executor = MultiThreadedExecutor()
         executor.add_node(node)
         log.info(
@@ -709,11 +767,12 @@ def _wait_for_action(timeout_s: float) -> bool:
 
 def _wait_for_speed_subscriber(timeout_s: float) -> bool:
     """Wait until Controller Server is subscribed, then apply the default."""
+    global _speed_subscriber_connected
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        publisher = _speed_publisher
-        if publisher is not None and publisher.get_subscription_count() > 0:
+        if _speed_channels_available():
             _publish_speed_limit()
+            _speed_subscriber_connected = True
             return True
         time.sleep(0.1)
     return False
@@ -778,6 +837,46 @@ def _resolve_run_id(run_id: str) -> str:
     return run_id or _last_run_id
 
 
+def _active_speed_run_id(run_id: str) -> str:
+    """Resolve and validate the goal that owns a non-persistent speed change."""
+    with _state_lock:
+        resolved = _resolve_run_id(run_id)
+        state = _goal_states.get(resolved)
+        if state is None:
+            raise ValueError("unknown run_id")
+        if state.get("state") not in {"PENDING", "RUNNING"}:
+            raise ValueError(
+                f"run is already {state.get('state', 'terminal').lower()}"
+            )
+    return resolved
+
+
+def _restore_speed_after_run(run_id: str) -> None:
+    """Restore the session limit when its goal-scoped override terminates."""
+    global _speed_percentage, _speed_scope, _speed_scope_run_id
+    global _speed_subscriber_connected
+    with _speed_lock:
+        if _speed_scope != "goal" or _speed_scope_run_id != run_id:
+            return
+        _speed_percentage = _session_speed_percentage
+        _speed_scope = "session"
+        _speed_scope_run_id = ""
+        try:
+            _publish_speed_limit(_speed_percentage)
+        except Exception as error:  # noqa: BLE001
+            _speed_subscriber_connected = False
+            log.warning(
+                "speed reset after navigation run %s will retry: %s",
+                run_id,
+                error,
+            )
+    log.info(
+        "restored session navigation speed after run %s: %.1f%%",
+        run_id,
+        _speed_percentage,
+    )
+
+
 def _goal_response_cb(fut, gid: str):
     try:
         gh = fut.result()
@@ -789,6 +888,7 @@ def _goal_response_cb(fut, gid: str):
                 "state": "CANCELED" if canceled else "FAILED",
                 "detail": "canceled before acceptance" if canceled else str(e),
             }
+        _restore_speed_after_run(gid)
         return
     if not gh.accepted:
         with _state_lock:
@@ -798,6 +898,7 @@ def _goal_response_cb(fut, gid: str):
                 "state": "CANCELED" if canceled else "FAILED",
                 "detail": "canceled before acceptance" if canceled else "goal rejected",
             }
+        _restore_speed_after_run(gid)
         return
     with _state_lock:
         previous = _goal_states.get(gid, {})
@@ -886,6 +987,7 @@ def _result_cb(fut, gid: str):
         with _state_lock:
             _goal_states[gid] = {"state": "FAILED", "detail": str(e)}
             _goal_handles.pop(gid, None)
+    _restore_speed_after_run(gid)
 
 
 def _dispatch_goal(node, gid: str, payload: dict):
@@ -907,6 +1009,7 @@ def _dispatch_goal(node, gid: str, payload: dict):
         with _state_lock:
             _goal_states[gid] = {"state": "FAILED",
                                  "detail": "nav action server not ready"}
+        _restore_speed_after_run(gid)
         return
     with _state_lock:
         _nav_diagnostics.clear()
@@ -947,6 +1050,8 @@ def init(cfg: dict):
     run() (see attach_grpc_servicer below); each guards on `_ros_node`, so
     a call landing before nav2 is ready returns a clean 'not initialized'."""
     global _initialized, _speed_settings, _speed_percentage
+    global _session_speed_percentage, _speed_scope, _speed_scope_run_id
+    global _speed_subscriber_connected
     with _state_lock:
         if _initialized:
             return Ok()
@@ -967,6 +1072,10 @@ def init(cfg: dict):
     with _speed_lock:
         _speed_settings = settings
         _speed_percentage = settings.default_percentage
+        _session_speed_percentage = settings.default_percentage
+        _speed_scope = "session"
+        _speed_scope_run_id = ""
+        _speed_subscriber_connected = False
 
     action_wait = float(cfg.get("action_wait_s", 45.0))
 
@@ -1003,15 +1112,17 @@ def init(cfg: dict):
     if not speed_ready:
         _kill_nav2()
         return Err(
-            "Nav2 controller did not subscribe to "
-            f"{_speed_settings.topic} within {speed_wait:.1f}s"
+            "Nav2 controller or final velocity guard did not subscribe to "
+            f"its speed-limit channel within {speed_wait:.1f}s "
+            f"(Nav2 topic: {_speed_settings.topic})"
         )
 
     with _state_lock:
         _initialized = True
     log.info(
-        "init complete: nav2 alive, navigate/status/cancel/set_speed serving "
-        "(speed=%.1f%%)",
+        "init complete: nav2 alive, navigation and speed capabilities serving "
+        "(max=%.3fm/s, speed=%.1f%%)",
+        settings.max_speed_xy_mps,
         _speed_percentage,
     )
     return Ok()
@@ -1066,6 +1177,7 @@ def _status_impl(run_id: str) -> dict:
 
 def _cancel_impl(run_id: str) -> dict:
     """Cancel an explicit run id, or the most recent active navigation run."""
+    restore_speed = False
     with _state_lock:
         resolved = _resolve_run_id(run_id)
         state = _goal_states.get(resolved)
@@ -1082,59 +1194,167 @@ def _cancel_impl(run_id: str) -> dict:
             if state.get("state") == "PENDING":
                 state["state"] = "CANCELED"
                 state["detail"] = "canceled before dispatch"
+                restore_speed = True
             else:
                 state["detail"] = "cancel queued until goal acceptance"
-            return {"accepted": True, "detail": state["detail"]}
-        state["cancel_requested"] = True
-        state["detail"] = "submitting cancel to Nav2"
+            detail = state["detail"]
+            gh = None
+        else:
+            state["cancel_requested"] = True
+            state["detail"] = "submitting cancel to Nav2"
+            detail = state["detail"]
+    if restore_speed:
+        _restore_speed_after_run(resolved)
+        return {"accepted": True, "detail": detail}
+    if gh is None:
+        return {"accepted": True, "detail": detail}
     accepted, detail = _issue_cancel(gh, resolved)
     return {"accepted": accepted, "detail": detail}
 
 
-def _set_speed_impl(operation: str, percentage: float) -> dict:
-    """Apply a relative or explicit limit to the live Nav2 controller."""
-    publisher = _speed_publisher
-    if not _initialized or publisher is None:
-        return {
-            "ok": False,
-            "changed": False,
-            "effective_percentage": 0.0,
-            "detail": "navigation is not initialized",
-        }
-    if publisher.get_subscription_count() == 0:
-        return {
-            "ok": False,
-            "changed": False,
-            "effective_percentage": 0.0,
-            "detail": "Nav2 speed-limit subscriber is unavailable",
-        }
-    try:
-        global _speed_percentage
-        with _speed_lock:
-            decision = decide_speed(
-                _speed_percentage, operation, percentage, _speed_settings
-            )
-            _publish_speed_limit(decision.percentage)
-            _speed_percentage = decision.percentage
-    except Exception as error:  # noqa: BLE001
-        return {
-            "ok": False,
-            "changed": False,
-            "effective_percentage": _speed_percentage,
-            "detail": str(error),
-        }
+def _speed_mutation_failure(detail: str) -> dict:
+    """Return the current speed state alongside a rejected mutation."""
+    status = _get_speed_limit_impl()
+    return {
+        "accepted": False,
+        "changed": False,
+        "effective_percentage": status["effective_percentage"],
+        "effective_speed_xy_mps": status["effective_speed_xy_mps"],
+        "scope": status["scope"],
+        "run_id": status["run_id"],
+        "detail": detail,
+    }
+
+
+def _apply_speed_decision(
+    decision: SpeedDecision,
+    run_id: str,
+    persist: bool,
+) -> dict:
+    """Publish one decision and commit either session or goal ownership."""
+    global _speed_percentage, _session_speed_percentage
+    global _speed_scope, _speed_scope_run_id
+    _publish_speed_limit(decision.percentage)
+    _speed_percentage = decision.percentage
+    if persist:
+        _session_speed_percentage = decision.percentage
+        _speed_scope = "session"
+        _speed_scope_run_id = ""
+    else:
+        _speed_scope = "goal"
+        _speed_scope_run_id = run_id
+    scope = _speed_scope
+    scoped_run_id = _speed_scope_run_id
     log.info(
-        "dynamic navigation speed operation=%s requested=%s effective=%.1f%%",
-        operation,
-        percentage,
+        "dynamic navigation speed scope=%s run_id=%s effective=%.1f%% "
+        "(%.3fm/s)",
+        scope,
+        scoped_run_id or "-",
         decision.percentage,
+        decision.speed_mps,
     )
     return {
-        "ok": True,
+        "accepted": True,
         "changed": decision.changed,
         "effective_percentage": decision.percentage,
+        "effective_speed_xy_mps": decision.speed_mps,
+        "scope": scope,
+        "run_id": scoped_run_id,
         "detail": decision.detail,
     }
+
+
+def _adjust_speed_impl(direction: str, run_id: str, persist: bool) -> dict:
+    """Apply faster, slower, or normal to a goal or provider session."""
+    publisher = _speed_publisher
+    if not _initialized or publisher is None:
+        return _speed_mutation_failure("navigation is not initialized")
+    if not _speed_channels_available():
+        return _speed_mutation_failure(
+            "Nav2 or final-guard speed-limit subscriber is unavailable"
+        )
+    try:
+        with _speed_lock:
+            settings = _speed_settings
+            if settings is None:
+                raise RuntimeError("dynamic speed settings are unavailable")
+            resolved = "" if persist else _active_speed_run_id(run_id)
+            decision = decide_adjustment(
+                _speed_percentage,
+                direction,
+                settings,
+            )
+            return _apply_speed_decision(decision, resolved, persist)
+    except Exception as error:  # noqa: BLE001
+        return _speed_mutation_failure(str(error))
+
+
+def _set_speed_limit_impl(
+    percentage: float,
+    run_id: str,
+    persist: bool,
+) -> dict:
+    """Set an explicit percentage for a goal or provider session."""
+    publisher = _speed_publisher
+    if not _initialized or publisher is None:
+        return _speed_mutation_failure("navigation is not initialized")
+    if not _speed_channels_available():
+        return _speed_mutation_failure(
+            "Nav2 or final-guard speed-limit subscriber is unavailable"
+        )
+    try:
+        with _speed_lock:
+            settings = _speed_settings
+            if settings is None:
+                raise RuntimeError("dynamic speed settings are unavailable")
+            resolved = "" if persist else _active_speed_run_id(run_id)
+            decision = decide_explicit(
+                _speed_percentage,
+                percentage,
+                settings,
+            )
+            return _apply_speed_decision(decision, resolved, persist)
+    except Exception as error:  # noqa: BLE001
+        return _speed_mutation_failure(str(error))
+
+
+def _get_speed_limit_impl() -> dict:
+    """Read configuration and effective state without mutating Navigation."""
+    with _speed_lock:
+        settings = _speed_settings
+        if settings is None:
+            return {
+                "available": False,
+                "max_speed_xy_mps": 0.0,
+                "default_percentage": 0.0,
+                "min_percentage": 0.0,
+                "step_percentage": 0.0,
+                "effective_percentage": 0.0,
+                "effective_speed_xy_mps": 0.0,
+                "scope": "",
+                "run_id": "",
+                "detail": "dynamic speed settings are unavailable",
+            }
+        effective_speed = (
+            settings.max_speed_xy_mps * _speed_percentage / 100.0
+        )
+        available = bool(_initialized and _speed_channels_available())
+        return {
+            "available": available,
+            "max_speed_xy_mps": settings.max_speed_xy_mps,
+            "default_percentage": settings.default_percentage,
+            "min_percentage": settings.min_percentage,
+            "step_percentage": settings.step_percentage,
+            "effective_percentage": _speed_percentage,
+            "effective_speed_xy_mps": effective_speed,
+            "scope": _speed_scope,
+            "run_id": _speed_scope_run_id,
+            "detail": (
+                "navigation speed limit is available"
+                if available
+                else "Nav2 or final-guard speed-limit subscriber is unavailable"
+            ),
+        }
 
 
 # ── gRPC servicers ───────────────────────────────────────────────────────────
@@ -1156,12 +1376,37 @@ class _CancelServicer(contracts_grpc.RobonixServiceNavigationNavigateCancelServi
         return navigation_pb2.CancelNavigation_Response(**out)
 
 
-class _SetSpeedServicer(
-    contracts_grpc.RobonixServiceNavigationSetSpeedServicer
+class _AdjustSpeedServicer(
+    contracts_grpc.RobonixServiceNavigationAdjustSpeedServicer
 ):
-    def SetNavigationSpeed(self, request, context):
-        out = _set_speed_impl(request.operation, request.percentage)
-        return navigation_pb2.SetNavigationSpeed_Response(**out)
+    def AdjustNavigationSpeed(self, request, context):
+        out = _adjust_speed_impl(
+            request.direction,
+            request.run_id,
+            request.persist,
+        )
+        return navigation_pb2.AdjustNavigationSpeed_Response(**out)
+
+
+class _SetSpeedLimitServicer(
+    contracts_grpc.RobonixServiceNavigationSetSpeedLimitServicer
+):
+    def SetNavigationSpeedLimit(self, request, context):
+        out = _set_speed_limit_impl(
+            request.percentage,
+            request.run_id,
+            request.persist,
+        )
+        return navigation_pb2.SetNavigationSpeedLimit_Response(**out)
+
+
+class _GetSpeedLimitServicer(
+    contracts_grpc.RobonixServiceNavigationGetSpeedLimitServicer
+):
+    def GetNavigationSpeedLimit(self, request, context):
+        return navigation_pb2.GetNavigationSpeedLimit_Response(
+            **_get_speed_limit_impl()
+        )
 
 
 # ── MCP tools ────────────────────────────────────────────────────────────────
@@ -1192,17 +1437,45 @@ def cancel(req: McpCancelRequest) -> McpCancelResponse:
     return McpCancelResponse(**out)
 
 
-@nav.mcp("robonix/service/navigation/set_speed")
-def set_speed(req: McpSetSpeedRequest) -> McpSetSpeedResponse:
-    """Change speed during a navigation run without replacing its goal.
+@nav.mcp("robonix/service/navigation/adjust_speed")
+def adjust_speed(req: McpAdjustSpeedRequest) -> McpAdjustSpeedResponse:
+    """Make Navigation faster, slower, or normal without replacing its goal.
 
-    operation is faster, slower, set, or reset. percentage is used only by
-    set and means a percentage of the deployment-owned Nav2 maximum.
+    direction must be faster, slower, or normal. Empty run_id selects the most
+    recent active run. persist=false restores the session limit when that run
+    ends; persist=true applies across navigation runs and ignores run_id.
     """
-    out = _set_speed_impl(req.operation, req.percentage)
-    if not out["ok"]:
+    out = _adjust_speed_impl(req.direction, req.run_id, req.persist)
+    if not out["accepted"]:
         raise RuntimeError(out["detail"])
-    return McpSetSpeedResponse(**out)
+    return McpAdjustSpeedResponse(**out)
+
+
+@nav.mcp("robonix/service/navigation/set_speed_limit")
+def set_speed_limit(
+    req: McpSetSpeedLimitRequest,
+) -> McpSetSpeedLimitResponse:
+    """Set a percentage of the configured maximum planar navigation speed.
+
+    Empty run_id selects the most recent active run. persist=false restores the
+    session limit when that run ends; persist=true applies across navigation
+    runs and ignores run_id.
+    """
+    out = _set_speed_limit_impl(req.percentage, req.run_id, req.persist)
+    if not out["accepted"]:
+        raise RuntimeError(out["detail"])
+    return McpSetSpeedLimitResponse(**out)
+
+
+@nav.mcp("robonix/service/navigation/get_speed_limit")
+def get_speed_limit(
+    req: McpGetSpeedLimitRequest,
+) -> McpGetSpeedLimitResponse:
+    """Read maximum, normal, minimum, step, effective limit, and scope."""
+    out = _get_speed_limit_impl()
+    if not out["available"]:
+        raise RuntimeError(out["detail"])
+    return McpGetSpeedLimitResponse(**out)
 
 
 # ── attach the navigate/status/cancel gRPC servicers ─────────────────────────
@@ -1214,7 +1487,13 @@ nav.attach_grpc_servicer("robonix/service/navigation/navigate", _NavigateService
 nav.attach_grpc_servicer("robonix/service/navigation/navigate/status", _StatusServicer())
 nav.attach_grpc_servicer("robonix/service/navigation/navigate/cancel", _CancelServicer())
 nav.attach_grpc_servicer(
-    "robonix/service/navigation/set_speed", _SetSpeedServicer()
+    "robonix/service/navigation/adjust_speed", _AdjustSpeedServicer()
+)
+nav.attach_grpc_servicer(
+    "robonix/service/navigation/set_speed_limit", _SetSpeedLimitServicer()
+)
+nav.attach_grpc_servicer(
+    "robonix/service/navigation/get_speed_limit", _GetSpeedLimitServicer()
 )
 
 

@@ -15,6 +15,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import Twist
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.msg import SpeedLimit
 from nav_msgs.msg import Odometry, Path as NavPath
 from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
@@ -22,6 +23,7 @@ from rclpy.executors import ExternalShutdownException
 
 from nav2_wrapper.configuration import resolve_velocity_output_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
+from nav2_wrapper.velocity_limit import bounded_linear_velocity
 
 
 def _yaw(q) -> float:
@@ -37,6 +39,21 @@ class VelocityGuardNode(Node):
         # Validate before constructing the ROS node or creating any endpoint.
         # An invalid/empty/relative output must fail closed with no publisher.
         output_topic = resolve_velocity_output_topic({})
+        max_speed_xy_mps = float(os.environ["ROBONIX_NAV_MAX_SPEED_XY_MPS"])
+        default_percentage = float(
+            os.environ["ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE"]
+        )
+        speed_limit_topic = os.environ[
+            "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC"
+        ]
+        if not math.isfinite(max_speed_xy_mps) or max_speed_xy_mps <= 0.0:
+            raise ValueError(
+                "ROBONIX_NAV_MAX_SPEED_XY_MPS must be finite and positive"
+            )
+        if not 0.0 < default_percentage <= 100.0:
+            raise ValueError(
+                "ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE must be in (0, 100]"
+            )
         super().__init__("robonix_velocity_guard")
         limits = GuardLimits(
             terminal_xy_m=float(os.getenv("ROBONIX_GUARD_TERMINAL_XY_M", "0.45")),
@@ -59,9 +76,17 @@ class VelocityGuardNode(Node):
         self._scan_log = (self._trace_dir / "scan-anomalies.jsonl").open("a", encoding="utf-8")
         self._front_min_history = deque(maxlen=20)
         self._last_scan_summary_at = 0.0
+        self._max_speed_xy_mps = max_speed_xy_mps
+        self._speed_percentage = default_percentage
+        self._effective_speed_xy_mps = (
+            max_speed_xy_mps * default_percentage / 100.0
+        )
 
         self._pub = self.create_publisher(Twist, output_topic, 10)
         self.create_subscription(Twist, "/cmd_vel_guard_input", self._on_cmd, 20)
+        self.create_subscription(
+            SpeedLimit, speed_limit_topic, self._on_speed_limit, 10
+        )
         self.create_subscription(Odometry, "/odom", self._on_odom, 50)
         self.create_subscription(NavPath, "/plan", self._on_plan, 10)
         self.create_subscription(LaserScan, "/scanner/scan", self._on_scan, 20)
@@ -77,8 +102,35 @@ class VelocityGuardNode(Node):
         self._cancel = self.create_client(CancelGoal, "/navigate_to_pose/_action/cancel_goal")
         self.create_timer(0.05, self._publish_latched_zero)
         self.get_logger().info(
-            f"guard active; output={output_topic}; traces={self._trace_dir}"
+            f"guard active; output={output_topic}; "
+            f"max_speed_xy={max_speed_xy_mps:g}m/s; "
+            f"default={default_percentage:g}%; traces={self._trace_dir}"
         )
+
+    def _on_speed_limit(self, msg: SpeedLimit) -> None:
+        """Track the live Nav2 limit and retain the configured hard maximum."""
+        value = float(msg.speed_limit)
+        if not math.isfinite(value) or value < 0.0:
+            self.get_logger().error(f"ignoring invalid speed limit: {value}")
+            return
+        with self._lock:
+            if value == 0.0:
+                percentage = 100.0
+                limit_mps = self._max_speed_xy_mps
+            elif msg.percentage:
+                percentage = min(100.0, max(0.0, value))
+                limit_mps = self._max_speed_xy_mps * percentage / 100.0
+            else:
+                limit_mps = min(self._max_speed_xy_mps, value)
+                percentage = limit_mps / self._max_speed_xy_mps * 100.0
+            self._speed_percentage = percentage
+            self._effective_speed_xy_mps = limit_mps
+            self._event(
+                "speed_limit",
+                percentage=percentage,
+                limit_mps=limit_mps,
+                source_percentage=bool(msg.percentage),
+            )
 
     def _event(self, kind: str, **values) -> None:
         if self._trace is None:
@@ -213,13 +265,30 @@ class VelocityGuardNode(Node):
 
     def _on_cmd(self, msg: Twist) -> None:
         with self._lock:
-            self._last_cmd = (float(msg.linear.x), float(msg.angular.z))
+            x, y, limited = bounded_linear_velocity(
+                float(msg.linear.x),
+                float(msg.linear.y),
+                self._effective_speed_xy_mps,
+            )
+            output = msg
+            if limited:
+                output = Twist()
+                output.linear.x = x
+                output.linear.y = y
+                output.linear.z = msg.linear.z
+                output.angular.x = msg.angular.x
+                output.angular.y = msg.angular.y
+                output.angular.z = msg.angular.z
+            self._last_cmd = (math.hypot(x, y), float(output.angular.z))
             reason = self.guard.evaluate(
                 self.get_clock().now().nanoseconds / 1e9,
                 self._last_cmd[0], self._last_cmd[1], self._robot_pose, self._goal_pose,
             )
             self._event(
                 "cmd", linear=self._last_cmd[0], angular=self._last_cmd[1],
+                requested_linear=math.hypot(msg.linear.x, msg.linear.y),
+                speed_limit_xy_mps=self._effective_speed_xy_mps,
+                speed_limited=limited,
                 terminal_rotation=self.guard.terminal_rotation,
                 continuous_rotation=self.guard.spin_rotation,
                 latched=bool(reason),
@@ -228,7 +297,7 @@ class VelocityGuardNode(Node):
                 self._trip(reason)
                 self._pub.publish(Twist())
             else:
-                self._pub.publish(msg)
+                self._pub.publish(output)
 
     def _trip(self, reason: str) -> None:
         if self._cancel_sent:

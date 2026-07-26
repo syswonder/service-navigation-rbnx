@@ -10,7 +10,9 @@ Provides:
 - `robonix/service/navigation/navigate`
 - `robonix/service/navigation/navigate/status`
 - `robonix/service/navigation/navigate/cancel`
-- `robonix/service/navigation/set_speed`
+- `robonix/service/navigation/adjust_speed`
+- `robonix/service/navigation/set_speed_limit`
+- `robonix/service/navigation/get_speed_limit`
 
 Consumes Atlas-selected providers for:
 
@@ -24,11 +26,12 @@ Relative paths use the directory containing `robonix_manifest.yaml`. A 3D lidar
 also requires explicit `scan_projection` config. Optional `bt_xml_file` selects
 a deploy-owned BehaviorTree. See `config.spec` for the complete instance config.
 
-`set_speed` changes Nav2's live controller limit without restarting the service
-or replacing the active goal. `faster` and `slower` adjust the current
-percentage; `set` applies an explicit percentage; `reset` restores the
-deployment default. Percentages are always bounded by the robot's
-deployment-owned Nav2 maximum.
+The speed capabilities change Nav2's live controller limit without restarting
+the service or replacing the active goal. `adjust_speed` handles relative and
+normal commands, `set_speed_limit` sets an explicit bounded percentage, and
+`get_speed_limit` is read-only. Goal-scoped changes restore automatically;
+persistent changes intentionally survive across runs. The deploy config
+defines `max_speed_xy_mps` in m/s and the normal percentage.
 
-The service does not own mapping, robot TF, body dimensions, hard motion
-limits, or robot-specific planner/controller tuning.
+The service does not own mapping, robot TF, body dimensions, or
+robot-specific planner/controller tuning.

@@ -21,7 +21,8 @@ service:
         odom: chassis
         scan: lidar
       dynamic_speed:
-        default_percentage: 80
+        max_speed_xy_mps: 0.4
+        default_percentage: 75
         step_percentage: 20
         min_percentage: 20
 ```
@@ -60,13 +61,20 @@ Set `config.velocity_output_topic` to a fully-qualified non-motion sink such as
 config field is absent; an explicit empty, relative, or malformed topic fails
 startup before the guard creates any ROS endpoint.
 
-`robonix/service/navigation/set_speed` changes the active Nav2 Controller
-Server at runtime. It accepts `faster`, `slower`, `set`, and `reset`; no
-restart, goal cancellation, or goal resubmission occurs. Relative operations
-use `dynamic_speed.step_percentage`, explicit values are bounded by
-`min_percentage` and 100%, and `reset` restores `default_percentage`.
-The default 80% leaves one step of headroom in both directions. Set 100% in a
-deployment that must preserve the previous always-unlimited startup behavior.
+Dynamic speed config uses Nav2-compatible SI semantics.
+`max_speed_xy_mps` is the hard planar limit `sqrt(vx^2 + vy^2)` in m/s and
+should match the selected controller plugin's `max_speed_xy`. The final
+velocity guard independently enforces it. `default_percentage` is the normal
+percentage of that limit, so the example starts at `0.4 * 75% = 0.3 m/s`.
+`step_percentage` is an additive number of percentage points.
+
+`adjust_speed` handles `faster`, `slower`, and `normal`;
+`set_speed_limit` applies an explicit percentage; and `get_speed_limit` reads
+the current and configured state. By default a mutation belongs to the
+selected active run and automatically restores the session limit when that run
+terminates. `persist=true` deliberately changes the provider-session limit
+across navigation runs. None of these operations restart Navigation, cancel a
+goal, or resubmit it.
 
 ## Runtime
 
@@ -98,7 +106,8 @@ python3 -m unittest -v \
   test_runtime_integration.py \
   test_rotation_guard.py \
   test_scan_filter.py \
-  test_speed_control.py
+  test_speed_control.py \
+  test_velocity_limit.py
 ```
 
 Jetson native builds require ROS 2 Humble and Nav2 packages compatible with the

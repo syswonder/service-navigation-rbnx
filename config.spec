@@ -19,6 +19,69 @@ required:
       scan: robonix/primitive/lidar/lidar
       scan_cloud: robonix/primitive/lidar/lidar3d
 
+  dynamic_speed:
+    type: mapping
+    description: >-
+      Deployment-owned policy for runtime navigation speed changes. Physical
+      quantities use SI units. The provider sends percentage limits through
+      nav2_msgs/SpeedLimit to Nav2's Controller Server and independently
+      enforces the resulting planar linear-speed limit at the final velocity
+      guard.
+    fields:
+      max_speed_xy_mps:
+        type: number
+        required: true
+        unit: metres per second (m/s)
+        constraints: finite and greater than 0
+        nav2_equivalent: >-
+          controller_server.ros__parameters.<controller_id>.max_speed_xy
+        description: >-
+          Deployment hard ceiling for planar linear speed
+          sqrt(vx^2 + vy^2). Set this to the selected Nav2 controller plugin's
+          configured max_speed_xy so percentage limits and reported metric
+          limits have the same reference. Per-axis limits such as max_vel_x
+          and max_vel_y remain valid and may be stricter. The final velocity
+          guard never publishes a planar command above this value, including
+          commands emitted by Nav2 recovery behaviors.
+        example: 0.4
+      default_percentage:
+        type: number
+        required: true
+        unit: percent (%)
+        constraints: min_percentage <= value <= 100
+        description: >-
+          Percentage of max_speed_xy_mps applied at provider startup and by a
+          normal command. It is also the initial session limit; a goal-scoped
+          adjustment restores the current session limit when the goal
+          terminates. For example, max_speed_xy_mps=0.4 and
+          default_percentage=75 produce a normal planar speed limit of 0.3 m/s.
+        example: 75
+      step_percentage:
+        type: number
+        default: 20
+        unit: percentage points
+        constraints: finite and in (0, 100]
+        description: >-
+          Additive change made by faster or slower. For example, a 20-point
+          step changes 75% to 95%, not to 90%.
+      min_percentage:
+        type: number
+        default: 20
+        unit: percent (%)
+        constraints: finite and in (0, default_percentage]
+        description: >-
+          Lowest percentage accepted by slower or set_speed_limit. This is not
+          a stop command; cancel or the chassis stop capability must be used to
+          stop motion.
+      topic:
+        type: string
+        default: /speed_limit
+        nav2_equivalent: controller_server.ros__parameters.speed_limit_topic
+        description: >-
+          Fully-qualified ROS topic carrying nav2_msgs/SpeedLimit. It must
+          match Controller Server's speed_limit_topic. Initialization fails if
+          Nav2 does not subscribe.
+
 optional:
   bt_xml_file:
     type: path
@@ -124,33 +187,6 @@ optional:
       Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
       The deployment config takes priority over the environment. Empty,
       relative, private, substituted, or malformed topic names fail startup.
-  dynamic_speed:
-    type: mapping
-    description: >-
-      Policy for runtime speed changes through
-      robonix/service/navigation/set_speed. Values are percentages of the
-      deployment-owned Nav2 controller maximum.
-    fields:
-      default_percentage:
-        type: number
-        default: 80
-        description: >-
-          Limit applied at startup and by reset. The default leaves headroom
-          for an initial faster command; set 100 for legacy startup behavior.
-      step_percentage:
-        type: number
-        default: 20
-        description: Percentage points added or removed by faster/slower.
-      min_percentage:
-        type: number
-        default: 20
-        description: Lowest limit accepted from slower or set.
-      topic:
-        type: string
-        default: /speed_limit
-        description: >-
-          Absolute ROS topic matching controller_server.speed_limit_topic.
-          Startup fails if Nav2 does not subscribe.
   guard_terminal_xy_m:
     type: number
     default: 0.45

@@ -8,9 +8,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpeedSettings:
-    """Validated provider policy expressed as percentages of Nav2's maximum."""
+    """Validated deployment policy for dynamic navigation speed limits."""
 
-    default_percentage: float = 80.0
+    max_speed_xy_mps: float
+    default_percentage: float
     step_percentage: float = 20.0
     min_percentage: float = 20.0
     topic: str = "/speed_limit"
@@ -18,21 +19,24 @@ class SpeedSettings:
 
 @dataclass(frozen=True)
 class SpeedDecision:
-    """Result of one relative, explicit, or reset speed command."""
+    """Result of one relative or explicit speed command."""
 
     percentage: float
+    speed_mps: float
     changed: bool
     detail: str
 
 
 def speed_settings(cfg: dict) -> SpeedSettings:
     """Validate the deploy-owned policy without importing ROS dependencies."""
-    raw = cfg.get("dynamic_speed", {})
-    if raw is None:
-        raw = {}
+    raw = cfg.get("dynamic_speed")
     if not isinstance(raw, dict):
-        raise ValueError("dynamic_speed must be a mapping")
+        raise ValueError(
+            "dynamic_speed must be a mapping with max_speed_xy_mps and "
+            "default_percentage"
+        )
     allowed = {
+        "max_speed_xy_mps",
         "default_percentage",
         "step_percentage",
         "min_percentage",
@@ -42,19 +46,29 @@ def speed_settings(cfg: dict) -> SpeedSettings:
     if unknown:
         raise ValueError(f"unknown dynamic_speed field(s): {sorted(unknown)}")
 
+    missing = {"max_speed_xy_mps", "default_percentage"} - set(raw)
+    if missing:
+        raise ValueError(f"missing dynamic_speed field(s): {sorted(missing)}")
+
     settings = SpeedSettings(
-        default_percentage=float(raw.get("default_percentage", 80.0)),
+        max_speed_xy_mps=float(raw["max_speed_xy_mps"]),
+        default_percentage=float(raw["default_percentage"]),
         step_percentage=float(raw.get("step_percentage", 20.0)),
         min_percentage=float(raw.get("min_percentage", 20.0)),
         topic=str(raw.get("topic", "/speed_limit")).strip(),
     )
     values = (
+        settings.max_speed_xy_mps,
         settings.default_percentage,
         settings.step_percentage,
         settings.min_percentage,
     )
     if not all(math.isfinite(value) for value in values):
-        raise ValueError("dynamic_speed percentages must be finite")
+        raise ValueError("dynamic_speed numeric fields must be finite")
+    if settings.max_speed_xy_mps <= 0.0:
+        raise ValueError(
+            "dynamic_speed max_speed_xy_mps must be greater than zero"
+        )
     if not 0.0 < settings.min_percentage <= settings.default_percentage <= 100.0:
         raise ValueError(
             "dynamic_speed requires 0 < min_percentage <= "
@@ -67,14 +81,33 @@ def speed_settings(cfg: dict) -> SpeedSettings:
     return settings
 
 
-def decide_speed(
+def _decision(
     current_percentage: float,
-    operation: str,
-    requested_percentage: float,
+    target_percentage: float,
+    settings: SpeedSettings,
+    action: str,
+) -> SpeedDecision:
+    """Build one bounded decision and its deploy-configured metric limit."""
+    target = round(float(target_percentage), 6)
+    changed = not math.isclose(
+        target, current_percentage, rel_tol=0.0, abs_tol=1e-9
+    )
+    speed_mps = round(settings.max_speed_xy_mps * target / 100.0, 6)
+    state = "changed" if changed else "already"
+    detail = (
+        f"navigation speed {state} at {target:g}% "
+        f"({speed_mps:g} m/s limit) after {action}"
+    )
+    return SpeedDecision(target, speed_mps, changed, detail)
+
+
+def decide_adjustment(
+    current_percentage: float,
+    direction: str,
     settings: SpeedSettings,
 ) -> SpeedDecision:
-    """Resolve a dynamic command while preserving the configured safety bounds."""
-    command = operation.strip().lower()
+    """Resolve faster, slower, or normal within the configured bounds."""
+    command = direction.strip().lower()
     if command == "faster":
         target = min(100.0, current_percentage + settings.step_percentage)
     elif command == "slower":
@@ -82,26 +115,29 @@ def decide_speed(
             settings.min_percentage,
             current_percentage - settings.step_percentage,
         )
-    elif command == "set":
-        if not math.isfinite(requested_percentage):
-            raise ValueError("percentage must be finite")
-        if not settings.min_percentage <= requested_percentage <= 100.0:
-            raise ValueError(
-                "percentage must be between "
-                f"{settings.min_percentage:g} and 100"
-            )
-        target = requested_percentage
-    elif command == "reset":
+    elif command == "normal":
         target = settings.default_percentage
     else:
-        raise ValueError("operation must be faster, slower, set, or reset")
+        raise ValueError("direction must be faster, slower, or normal")
+    return _decision(current_percentage, target, settings, command)
 
-    target = round(float(target), 6)
-    changed = not math.isclose(
-        target, current_percentage, rel_tol=0.0, abs_tol=1e-9
+
+def decide_explicit(
+    current_percentage: float,
+    requested_percentage: float,
+    settings: SpeedSettings,
+) -> SpeedDecision:
+    """Resolve an explicit percentage within the configured safety bounds."""
+    if not math.isfinite(requested_percentage):
+        raise ValueError("percentage must be finite")
+    if not settings.min_percentage <= requested_percentage <= 100.0:
+        raise ValueError(
+            "percentage must be between "
+            f"{settings.min_percentage:g} and 100"
+        )
+    return _decision(
+        current_percentage,
+        requested_percentage,
+        settings,
+        "explicit set",
     )
-    if changed:
-        detail = f"navigation speed changed to {target:g}%"
-    else:
-        detail = f"navigation speed already at {target:g}%"
-    return SpeedDecision(target, changed, detail)
