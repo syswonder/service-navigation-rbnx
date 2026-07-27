@@ -21,7 +21,8 @@ service:
         odom: chassis
         scan: lidar
       dynamic_speed:
-        max_speed_xy_mps: 0.4
+        max_linear_speed_mps: 0.3
+        max_angular_speed_radps: 0.6
         default_percentage: 75
         step_percentage: 20
         min_percentage: 20
@@ -62,11 +63,14 @@ config field is absent; an explicit empty, relative, or malformed topic fails
 startup before the guard creates any ROS endpoint.
 
 Dynamic speed config uses Nav2-compatible SI semantics.
-`max_speed_xy_mps` is the hard planar limit `sqrt(vx^2 + vy^2)` in m/s and
-should match the selected controller plugin's `max_speed_xy`. The final
-velocity guard independently enforces it. `default_percentage` is the normal
-percentage of that limit, so the example starts at `0.4 * 75% = 0.3 m/s`.
-`step_percentage` is an additive number of percentage points.
+`max_linear_speed_mps` is the actual hard planar limit
+`sqrt(vx^2 + vy^2)` in m/s after considering both the selected controller's
+`max_speed_xy` and stricter per-axis limits. `max_angular_speed_radps` is the
+hard yaw-rate limit `abs(wz)` in rad/s and corresponds to DWB's
+`max_vel_theta`. The final velocity guard independently enforces both.
+`default_percentage` scales both maxima, so the example starts at
+`0.225 m/s` and `0.45 rad/s`. `step_percentage` is an additive number of
+percentage points.
 
 `adjust_speed` handles `faster`, `slower`, and `normal`;
 `set_speed_limit` applies an explicit percentage; and `get_speed_limit` reads

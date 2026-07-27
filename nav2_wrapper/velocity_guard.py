@@ -23,7 +23,10 @@ from rclpy.executors import ExternalShutdownException
 
 from nav2_wrapper.configuration import resolve_velocity_output_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
-from nav2_wrapper.velocity_limit import bounded_linear_velocity
+from nav2_wrapper.velocity_limit import (
+    bounded_angular_velocity,
+    bounded_linear_velocity,
+)
 
 
 def _yaw(q) -> float:
@@ -39,16 +42,31 @@ class VelocityGuardNode(Node):
         # Validate before constructing the ROS node or creating any endpoint.
         # An invalid/empty/relative output must fail closed with no publisher.
         output_topic = resolve_velocity_output_topic({})
-        max_speed_xy_mps = float(os.environ["ROBONIX_NAV_MAX_SPEED_XY_MPS"])
+        max_linear_speed_mps = float(
+            os.environ["ROBONIX_NAV_MAX_LINEAR_SPEED_MPS"]
+        )
+        max_angular_speed_radps = float(
+            os.environ["ROBONIX_NAV_MAX_ANGULAR_SPEED_RADPS"]
+        )
         default_percentage = float(
             os.environ["ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE"]
         )
         speed_limit_topic = os.environ[
             "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC"
         ]
-        if not math.isfinite(max_speed_xy_mps) or max_speed_xy_mps <= 0.0:
+        if (
+            not math.isfinite(max_linear_speed_mps)
+            or max_linear_speed_mps <= 0.0
+        ):
             raise ValueError(
-                "ROBONIX_NAV_MAX_SPEED_XY_MPS must be finite and positive"
+                "ROBONIX_NAV_MAX_LINEAR_SPEED_MPS must be finite and positive"
+            )
+        if (
+            not math.isfinite(max_angular_speed_radps)
+            or max_angular_speed_radps <= 0.0
+        ):
+            raise ValueError(
+                "ROBONIX_NAV_MAX_ANGULAR_SPEED_RADPS must be finite and positive"
             )
         if not 0.0 < default_percentage <= 100.0:
             raise ValueError(
@@ -76,10 +94,14 @@ class VelocityGuardNode(Node):
         self._scan_log = (self._trace_dir / "scan-anomalies.jsonl").open("a", encoding="utf-8")
         self._front_min_history = deque(maxlen=20)
         self._last_scan_summary_at = 0.0
-        self._max_speed_xy_mps = max_speed_xy_mps
+        self._max_linear_speed_mps = max_linear_speed_mps
+        self._max_angular_speed_radps = max_angular_speed_radps
         self._speed_percentage = default_percentage
-        self._effective_speed_xy_mps = (
-            max_speed_xy_mps * default_percentage / 100.0
+        self._effective_linear_speed_mps = (
+            max_linear_speed_mps * default_percentage / 100.0
+        )
+        self._effective_angular_speed_radps = (
+            max_angular_speed_radps * default_percentage / 100.0
         )
 
         self._pub = self.create_publisher(Twist, output_topic, 10)
@@ -103,7 +125,8 @@ class VelocityGuardNode(Node):
         self.create_timer(0.05, self._publish_latched_zero)
         self.get_logger().info(
             f"guard active; output={output_topic}; "
-            f"max_speed_xy={max_speed_xy_mps:g}m/s; "
+            f"max_linear={max_linear_speed_mps:g}m/s; "
+            f"max_angular={max_angular_speed_radps:g}rad/s; "
             f"default={default_percentage:g}%; traces={self._trace_dir}"
         )
 
@@ -116,19 +139,28 @@ class VelocityGuardNode(Node):
         with self._lock:
             if value == 0.0:
                 percentage = 100.0
-                limit_mps = self._max_speed_xy_mps
+                linear_limit_mps = self._max_linear_speed_mps
             elif msg.percentage:
                 percentage = min(100.0, max(0.0, value))
-                limit_mps = self._max_speed_xy_mps * percentage / 100.0
+                linear_limit_mps = (
+                    self._max_linear_speed_mps * percentage / 100.0
+                )
             else:
-                limit_mps = min(self._max_speed_xy_mps, value)
-                percentage = limit_mps / self._max_speed_xy_mps * 100.0
+                linear_limit_mps = min(self._max_linear_speed_mps, value)
+                percentage = (
+                    linear_limit_mps / self._max_linear_speed_mps * 100.0
+                )
+            angular_limit_radps = (
+                self._max_angular_speed_radps * percentage / 100.0
+            )
             self._speed_percentage = percentage
-            self._effective_speed_xy_mps = limit_mps
+            self._effective_linear_speed_mps = linear_limit_mps
+            self._effective_angular_speed_radps = angular_limit_radps
             self._event(
                 "speed_limit",
                 percentage=percentage,
-                limit_mps=limit_mps,
+                linear_limit_mps=linear_limit_mps,
+                angular_limit_radps=angular_limit_radps,
                 source_percentage=bool(msg.percentage),
             )
 
@@ -268,17 +300,21 @@ class VelocityGuardNode(Node):
             x, y, limited = bounded_linear_velocity(
                 float(msg.linear.x),
                 float(msg.linear.y),
-                self._effective_speed_xy_mps,
+                self._effective_linear_speed_mps,
+            )
+            z, angular_limited = bounded_angular_velocity(
+                float(msg.angular.z),
+                self._effective_angular_speed_radps,
             )
             output = msg
-            if limited:
+            if limited or angular_limited:
                 output = Twist()
                 output.linear.x = x
                 output.linear.y = y
                 output.linear.z = msg.linear.z
                 output.angular.x = msg.angular.x
                 output.angular.y = msg.angular.y
-                output.angular.z = msg.angular.z
+                output.angular.z = z
             self._last_cmd = (math.hypot(x, y), float(output.angular.z))
             reason = self.guard.evaluate(
                 self.get_clock().now().nanoseconds / 1e9,
@@ -287,8 +323,11 @@ class VelocityGuardNode(Node):
             self._event(
                 "cmd", linear=self._last_cmd[0], angular=self._last_cmd[1],
                 requested_linear=math.hypot(msg.linear.x, msg.linear.y),
-                speed_limit_xy_mps=self._effective_speed_xy_mps,
-                speed_limited=limited,
+                requested_angular=float(msg.angular.z),
+                linear_limit_mps=self._effective_linear_speed_mps,
+                angular_limit_radps=self._effective_angular_speed_radps,
+                linear_limited=limited,
+                angular_limited=angular_limited,
                 terminal_rotation=self.guard.terminal_rotation,
                 continuous_rotation=self.guard.spin_rotation,
                 latched=bool(reason),

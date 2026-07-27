@@ -25,36 +25,50 @@ required:
       Deployment-owned policy for runtime navigation speed changes. Physical
       quantities use SI units. The provider sends percentage limits through
       nav2_msgs/SpeedLimit to Nav2's Controller Server and independently
-      enforces the resulting planar linear-speed limit at the final velocity
-      guard.
+      enforces the resulting planar linear-speed and yaw-rate limits at the
+      final velocity guard.
     fields:
-      max_speed_xy_mps:
+      max_linear_speed_mps:
         type: number
         required: true
         unit: metres per second (m/s)
         constraints: finite and greater than 0
         nav2_equivalent: >-
-          controller_server.ros__parameters.<controller_id>.max_speed_xy
+          The effective planar ceiling formed by the selected controller's
+          max_speed_xy and per-axis max_vel_x/max_vel_y parameters.
         description: >-
           Deployment hard ceiling for planar linear speed
-          sqrt(vx^2 + vy^2). Set this to the selected Nav2 controller plugin's
-          configured max_speed_xy so percentage limits and reported metric
-          limits have the same reference. Per-axis limits such as max_vel_x
-          and max_vel_y remain valid and may be stricter. The final velocity
-          guard never publishes a planar command above this value, including
-          commands emitted by Nav2 recovery behaviors.
-        example: 0.4
+          sqrt(vx^2 + vy^2). Set it to the actual maximum allowed by all
+          selected-controller constraints, not merely max_speed_xy when a
+          per-axis limit is stricter. For a non-holonomic DWB configuration
+          with max_vel_y=0, max_vel_x=0.3, and max_speed_xy=0.3, use 0.3.
+          The final guard never publishes a planar command above this value,
+          including commands emitted by Nav2 recovery behaviors.
+        example: 0.3
+      max_angular_speed_radps:
+        type: number
+        required: true
+        unit: radians per second (rad/s)
+        constraints: finite and greater than 0
+        nav2_equivalent: >-
+          controller_server.ros__parameters.<controller_id>.max_vel_theta
+        description: >-
+          Deployment hard ceiling for yaw rate abs(wz). The final guard clamps
+          positive and negative yaw commands symmetrically, including commands
+          emitted by Nav2 recovery behaviors.
+        example: 0.6
       default_percentage:
         type: number
         required: true
         unit: percent (%)
         constraints: min_percentage <= value <= 100
         description: >-
-          Percentage of max_speed_xy_mps applied at provider startup and by a
-          normal command. It is also the initial session limit; a goal-scoped
-          adjustment restores the current session limit when the goal
-          terminates. For example, max_speed_xy_mps=0.4 and
-          default_percentage=75 produce a normal planar speed limit of 0.3 m/s.
+          Percentage applied to both max_linear_speed_mps and
+          max_angular_speed_radps at provider startup and by a normal command.
+          It is also the initial session limit; a goal-scoped adjustment
+          restores the current session limit when the goal terminates. For
+          example, maxima of 0.3 m/s and 0.6 rad/s with
+          default_percentage=75 produce limits of 0.225 m/s and 0.45 rad/s.
         example: 75
       step_percentage:
         type: number

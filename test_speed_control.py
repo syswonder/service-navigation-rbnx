@@ -19,7 +19,8 @@ class SpeedSettingsTest(unittest.TestCase):
         settings = speed_settings(
             {
                 "dynamic_speed": {
-                    "max_speed_xy_mps": 0.4,
+                    "max_linear_speed_mps": 0.3,
+                    "max_angular_speed_radps": 0.6,
                     "default_percentage": 75,
                     "step_percentage": 15,
                     "min_percentage": 25,
@@ -30,7 +31,8 @@ class SpeedSettingsTest(unittest.TestCase):
         self.assertEqual(
             settings,
             SpeedSettings(
-                0.4,
+                0.3,
+                0.6,
                 75.0,
                 15.0,
                 25.0,
@@ -40,12 +42,19 @@ class SpeedSettingsTest(unittest.TestCase):
 
     def test_rejects_invalid_policy(self):
         valid_required = {
-            "max_speed_xy_mps": 0.4,
+            "max_linear_speed_mps": 0.3,
+            "max_angular_speed_radps": 0.6,
             "default_percentage": 75,
         }
         invalid = (
             {"dynamic_speed": {**valid_required, "unknown": 1}},
-            {"dynamic_speed": {**valid_required, "max_speed_xy_mps": 0}},
+            {"dynamic_speed": {**valid_required, "max_linear_speed_mps": 0}},
+            {
+                "dynamic_speed": {
+                    **valid_required,
+                    "max_angular_speed_radps": 0,
+                }
+            },
             {"dynamic_speed": {**valid_required, "default_percentage": 101}},
             {"dynamic_speed": {**valid_required, "min_percentage": 0}},
             {"dynamic_speed": {**valid_required, "step_percentage": math.inf}},
@@ -59,7 +68,8 @@ class SpeedSettingsTest(unittest.TestCase):
 class SpeedDecisionTest(unittest.TestCase):
     def setUp(self):
         self.settings = SpeedSettings(
-            max_speed_xy_mps=0.4,
+            max_linear_speed_mps=0.3,
+            max_angular_speed_radps=0.6,
             default_percentage=75.0,
             step_percentage=20.0,
             min_percentage=20.0,
@@ -72,8 +82,22 @@ class SpeedDecisionTest(unittest.TestCase):
             "faster",
             self.settings,
         )
-        self.assertEqual((slower.percentage, slower.speed_mps), (55.0, 0.22))
-        self.assertEqual((faster.percentage, faster.speed_mps), (75.0, 0.3))
+        self.assertEqual(
+            (
+                slower.percentage,
+                slower.linear_speed_mps,
+                slower.angular_speed_radps,
+            ),
+            (55.0, 0.165, 0.33),
+        )
+        self.assertEqual(
+            (
+                faster.percentage,
+                faster.linear_speed_mps,
+                faster.angular_speed_radps,
+            ),
+            (75.0, 0.225, 0.45),
+        )
 
     def test_relative_commands_are_safely_bounded(self):
         self.assertEqual(
