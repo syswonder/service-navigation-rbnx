@@ -1,4 +1,4 @@
-"""ROS-independent helpers for enforcing navigation velocity ceilings."""
+"""ROS-independent helpers for enforcing a planar navigation speed ceiling."""
 
 from __future__ import annotations
 
@@ -16,18 +16,3 @@ def bounded_linear_velocity(
         return float(x), float(y), False
     scale = max_linear_speed_mps / speed
     return float(x) * scale, float(y) * scale, True
-
-
-def bounded_angular_velocity(
-    z: float,
-    max_angular_speed_radps: float,
-) -> tuple[float, bool]:
-    """Clamp yaw rate symmetrically while preserving rotation direction."""
-    value = float(z)
-    bounded = min(max(value, -max_angular_speed_radps), max_angular_speed_radps)
-    return bounded, not math.isclose(
-        bounded,
-        value,
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    )

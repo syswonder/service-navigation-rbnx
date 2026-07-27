@@ -1,10 +1,7 @@
 import math
 import unittest
 
-from nav2_wrapper.velocity_limit import (
-    bounded_angular_velocity,
-    bounded_linear_velocity,
-)
+from nav2_wrapper.velocity_limit import bounded_linear_velocity
 
 
 class VelocityLimitTest(unittest.TestCase):
@@ -25,23 +22,6 @@ class VelocityLimitTest(unittest.TestCase):
         self.assertTrue(limited)
         self.assertAlmostEqual(x, -0.3)
         self.assertEqual(y, 0.0)
-
-    def test_yaw_rate_below_limit_is_unchanged(self):
-        self.assertEqual(
-            bounded_angular_velocity(0.4, 0.6),
-            (0.4, False),
-        )
-
-    def test_yaw_rate_is_clamped_symmetrically(self):
-        self.assertEqual(
-            bounded_angular_velocity(0.8, 0.6),
-            (0.6, True),
-        )
-        self.assertEqual(
-            bounded_angular_velocity(-0.8, 0.6),
-            (-0.6, True),
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

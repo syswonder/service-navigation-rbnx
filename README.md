@@ -22,7 +22,6 @@ service:
         scan: lidar
       dynamic_speed:
         max_linear_speed_mps: 0.3
-        max_angular_speed_radps: 0.6
         default_percentage: 75
         step_percentage: 20
         min_percentage: 20
@@ -65,12 +64,13 @@ startup before the guard creates any ROS endpoint.
 Dynamic speed config uses Nav2-compatible SI semantics.
 `max_linear_speed_mps` is the actual hard planar limit
 `sqrt(vx^2 + vy^2)` in m/s after considering both the selected controller's
-`max_speed_xy` and stricter per-axis limits. `max_angular_speed_radps` is the
-hard yaw-rate limit `abs(wz)` in rad/s and corresponds to DWB's
-`max_vel_theta`. The final velocity guard independently enforces both.
-`default_percentage` scales both maxima, so the example starts at
-`0.225 m/s` and `0.45 rad/s`. `step_percentage` is an additive number of
-percentage points.
+`max_speed_xy` and stricter per-axis limits. The final velocity guard
+independently enforces this linear limit. `default_percentage` scales that
+maximum, so the example starts at `0.225 m/s`. `step_percentage` is an additive
+number of percentage points. Angular constraints such as DWB's
+`max_vel_theta` stay in the deploy-owned Nav2 YAML; a controller may
+proportionally adjust its internal kinematics when it processes a Nav2 speed
+limit, but Robonix does not expose a separate angular-speed policy here.
 
 `adjust_speed` handles `faster`, `slower`, and `normal`;
 `set_speed_limit` applies an explicit percentage; and `get_speed_limit` reads

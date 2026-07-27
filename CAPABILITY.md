@@ -31,8 +31,8 @@ the service or replacing the active goal. `adjust_speed` handles relative and
 normal commands, `set_speed_limit` sets an explicit bounded percentage, and
 `get_speed_limit` is read-only. Goal-scoped changes restore automatically;
 persistent changes intentionally survive across runs. The deploy config
-defines the maximum planar linear speed in m/s, maximum yaw rate in rad/s, and
-the normal percentage applied to both.
+defines the maximum planar linear speed in m/s and the normal percentage.
+Angular constraints remain part of the deploy-owned Nav2 controller config.
 
 The service does not own mapping, robot TF, body dimensions, or
 robot-specific planner/controller tuning.

@@ -160,9 +160,7 @@ class RuntimeIntegrationTest(unittest.TestCase):
         speed_source = source[source.index("def _adjust_speed_impl"):]
         self.assertNotIn("_nav_queue.put", speed_source)
         self.assertIn("ROBONIX_NAV_MAX_LINEAR_SPEED_MPS", source)
-        self.assertIn("ROBONIX_NAV_MAX_ANGULAR_SPEED_RADPS", source)
         self.assertIn("bounded_linear_velocity(", guard)
-        self.assertIn("bounded_angular_velocity(", guard)
         for manifest in manifests:
             self.assertIn("robonix/service/navigation/adjust_speed", manifest)
             self.assertIn(

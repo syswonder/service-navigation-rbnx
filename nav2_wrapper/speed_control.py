@@ -11,7 +11,6 @@ class SpeedSettings:
     """Validated deployment policy for dynamic navigation speed limits."""
 
     max_linear_speed_mps: float
-    max_angular_speed_radps: float
     default_percentage: float
     step_percentage: float = 20.0
     min_percentage: float = 20.0
@@ -24,7 +23,6 @@ class SpeedDecision:
 
     percentage: float
     linear_speed_mps: float
-    angular_speed_radps: float
     changed: bool
     detail: str
 
@@ -34,12 +32,11 @@ def speed_settings(cfg: dict) -> SpeedSettings:
     raw = cfg.get("dynamic_speed")
     if not isinstance(raw, dict):
         raise ValueError(
-            "dynamic_speed must be a mapping with max_linear_speed_mps, "
-            "max_angular_speed_radps, and default_percentage"
+            "dynamic_speed must be a mapping with max_linear_speed_mps and "
+            "default_percentage"
         )
     allowed = {
         "max_linear_speed_mps",
-        "max_angular_speed_radps",
         "default_percentage",
         "step_percentage",
         "min_percentage",
@@ -51,7 +48,6 @@ def speed_settings(cfg: dict) -> SpeedSettings:
 
     missing = {
         "max_linear_speed_mps",
-        "max_angular_speed_radps",
         "default_percentage",
     } - set(raw)
     if missing:
@@ -59,7 +55,6 @@ def speed_settings(cfg: dict) -> SpeedSettings:
 
     settings = SpeedSettings(
         max_linear_speed_mps=float(raw["max_linear_speed_mps"]),
-        max_angular_speed_radps=float(raw["max_angular_speed_radps"]),
         default_percentage=float(raw["default_percentage"]),
         step_percentage=float(raw.get("step_percentage", 20.0)),
         min_percentage=float(raw.get("min_percentage", 20.0)),
@@ -67,7 +62,6 @@ def speed_settings(cfg: dict) -> SpeedSettings:
     )
     values = (
         settings.max_linear_speed_mps,
-        settings.max_angular_speed_radps,
         settings.default_percentage,
         settings.step_percentage,
         settings.min_percentage,
@@ -77,10 +71,6 @@ def speed_settings(cfg: dict) -> SpeedSettings:
     if settings.max_linear_speed_mps <= 0.0:
         raise ValueError(
             "dynamic_speed max_linear_speed_mps must be greater than zero"
-        )
-    if settings.max_angular_speed_radps <= 0.0:
-        raise ValueError(
-            "dynamic_speed max_angular_speed_radps must be greater than zero"
         )
     if not 0.0 < settings.min_percentage <= settings.default_percentage <= 100.0:
         raise ValueError(
@@ -109,20 +99,14 @@ def _decision(
         settings.max_linear_speed_mps * target / 100.0,
         6,
     )
-    angular_speed_radps = round(
-        settings.max_angular_speed_radps * target / 100.0,
-        6,
-    )
     state = "changed" if changed else "already"
     detail = (
         f"navigation speed {state} at {target:g}% "
-        f"({linear_speed_mps:g} m/s linear, "
-        f"{angular_speed_radps:g} rad/s angular) after {action}"
+        f"({linear_speed_mps:g} m/s linear limit) after {action}"
     )
     return SpeedDecision(
         target,
         linear_speed_mps,
-        angular_speed_radps,
         changed,
         detail,
     )

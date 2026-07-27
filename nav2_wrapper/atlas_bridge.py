@@ -570,9 +570,6 @@ def _spawn_velocity_guard(cfg: dict) -> None:
         "ROBONIX_NAV_MAX_LINEAR_SPEED_MPS": str(
             settings.max_linear_speed_mps
         ),
-        "ROBONIX_NAV_MAX_ANGULAR_SPEED_RADPS": str(
-            settings.max_angular_speed_radps
-        ),
         "ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE": str(
             settings.default_percentage
         ),
@@ -1126,9 +1123,8 @@ def init(cfg: dict):
         _initialized = True
     log.info(
         "init complete: nav2 alive, navigation and speed capabilities serving "
-        "(max_linear=%.3fm/s, max_angular=%.3frad/s, speed=%.1f%%)",
+        "(max_linear=%.3fm/s, speed=%.1f%%)",
         settings.max_linear_speed_mps,
-        settings.max_angular_speed_radps,
         _speed_percentage,
     )
     return Ok()
@@ -1228,9 +1224,6 @@ def _speed_mutation_failure(detail: str) -> dict:
         "effective_linear_speed_mps": status[
             "effective_linear_speed_mps"
         ],
-        "effective_angular_speed_radps": status[
-            "effective_angular_speed_radps"
-        ],
         "scope": status["scope"],
         "run_id": status["run_id"],
         "detail": detail,
@@ -1258,19 +1251,17 @@ def _apply_speed_decision(
     scoped_run_id = _speed_scope_run_id
     log.info(
         "dynamic navigation speed scope=%s run_id=%s effective=%.1f%% "
-        "(linear=%.3fm/s, angular=%.3frad/s)",
+        "(linear=%.3fm/s)",
         scope,
         scoped_run_id or "-",
         decision.percentage,
         decision.linear_speed_mps,
-        decision.angular_speed_radps,
     )
     return {
         "accepted": True,
         "changed": decision.changed,
         "effective_percentage": decision.percentage,
         "effective_linear_speed_mps": decision.linear_speed_mps,
-        "effective_angular_speed_radps": decision.angular_speed_radps,
         "scope": scope,
         "run_id": scoped_run_id,
         "detail": decision.detail,
@@ -1339,13 +1330,11 @@ def _get_speed_limit_impl() -> dict:
             return {
                 "available": False,
                 "max_linear_speed_mps": 0.0,
-                "max_angular_speed_radps": 0.0,
                 "default_percentage": 0.0,
                 "min_percentage": 0.0,
                 "step_percentage": 0.0,
                 "effective_percentage": 0.0,
                 "effective_linear_speed_mps": 0.0,
-                "effective_angular_speed_radps": 0.0,
                 "scope": "",
                 "run_id": "",
                 "detail": "dynamic speed settings are unavailable",
@@ -1353,20 +1342,15 @@ def _get_speed_limit_impl() -> dict:
         effective_linear_speed = (
             settings.max_linear_speed_mps * _speed_percentage / 100.0
         )
-        effective_angular_speed = (
-            settings.max_angular_speed_radps * _speed_percentage / 100.0
-        )
         available = bool(_initialized and _speed_channels_available())
         return {
             "available": available,
             "max_linear_speed_mps": settings.max_linear_speed_mps,
-            "max_angular_speed_radps": settings.max_angular_speed_radps,
             "default_percentage": settings.default_percentage,
             "min_percentage": settings.min_percentage,
             "step_percentage": settings.step_percentage,
             "effective_percentage": _speed_percentage,
             "effective_linear_speed_mps": effective_linear_speed,
-            "effective_angular_speed_radps": effective_angular_speed,
             "scope": _speed_scope,
             "run_id": _speed_scope_run_id,
             "detail": (

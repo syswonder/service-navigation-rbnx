@@ -25,8 +25,9 @@ required:
       Deployment-owned policy for runtime navigation speed changes. Physical
       quantities use SI units. The provider sends percentage limits through
       nav2_msgs/SpeedLimit to Nav2's Controller Server and independently
-      enforces the resulting planar linear-speed and yaw-rate limits at the
-      final velocity guard.
+      enforces the resulting planar linear-speed limit at the final velocity
+      guard. Controller-specific angular behavior remains owned by the Nav2
+      parameter file rather than this Robonix interface.
     fields:
       max_linear_speed_mps:
         type: number
@@ -45,30 +46,17 @@ required:
           The final guard never publishes a planar command above this value,
           including commands emitted by Nav2 recovery behaviors.
         example: 0.3
-      max_angular_speed_radps:
-        type: number
-        required: true
-        unit: radians per second (rad/s)
-        constraints: finite and greater than 0
-        nav2_equivalent: >-
-          controller_server.ros__parameters.<controller_id>.max_vel_theta
-        description: >-
-          Deployment hard ceiling for yaw rate abs(wz). The final guard clamps
-          positive and negative yaw commands symmetrically, including commands
-          emitted by Nav2 recovery behaviors.
-        example: 0.6
       default_percentage:
         type: number
         required: true
         unit: percent (%)
         constraints: min_percentage <= value <= 100
         description: >-
-          Percentage applied to both max_linear_speed_mps and
-          max_angular_speed_radps at provider startup and by a normal command.
-          It is also the initial session limit; a goal-scoped adjustment
-          restores the current session limit when the goal terminates. For
-          example, maxima of 0.3 m/s and 0.6 rad/s with
-          default_percentage=75 produce limits of 0.225 m/s and 0.45 rad/s.
+          Percentage of max_linear_speed_mps applied at provider startup and
+          by a normal command. It is also the initial session limit; a
+          goal-scoped adjustment restores the current session limit when the
+          goal terminates. For example, max_linear_speed_mps=0.3 with
+          default_percentage=75 produces a planar limit of 0.225 m/s.
         example: 75
       step_percentage:
         type: number
