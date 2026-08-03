@@ -19,6 +19,71 @@ required:
       scan: robonix/primitive/lidar/lidar
       scan_cloud: robonix/primitive/lidar/lidar3d
 
+  dynamic_speed:
+    type: mapping
+    description: >-
+      Deployment-owned policy for runtime navigation speed changes. Physical
+      quantities use SI units. The provider sends percentage limits through
+      nav2_msgs/SpeedLimit to Nav2's Controller Server and independently
+      enforces the resulting planar linear-speed limit at the final velocity
+      guard. Controller-specific angular behavior remains owned by the Nav2
+      parameter file rather than this Robonix interface.
+    fields:
+      max_linear_speed_mps:
+        type: number
+        required: true
+        unit: metres per second (m/s)
+        constraints: finite and greater than 0
+        nav2_equivalent: >-
+          The effective planar ceiling formed by the selected controller's
+          max_speed_xy and per-axis max_vel_x/max_vel_y parameters.
+        description: >-
+          Deployment hard ceiling for planar linear speed
+          sqrt(vx^2 + vy^2). Set it to the actual maximum allowed by all
+          selected-controller constraints, not merely max_speed_xy when a
+          per-axis limit is stricter. For a non-holonomic DWB configuration
+          with max_vel_y=0, max_vel_x=0.3, and max_speed_xy=0.3, use 0.3.
+          The final guard never publishes a planar command above this value,
+          including commands emitted by Nav2 recovery behaviors.
+        example: 0.3
+      default_percentage:
+        type: number
+        required: true
+        unit: percent (%)
+        constraints: min_percentage <= value <= 100
+        description: >-
+          Percentage of max_linear_speed_mps applied at provider startup and
+          by a normal command. It is also the initial session limit; a
+          goal-scoped adjustment restores the current session limit when the
+          goal terminates. For example, max_linear_speed_mps=0.3 with
+          default_percentage=75 produces a planar limit of 0.225 m/s.
+        example: 75
+      step_percentage:
+        type: number
+        default: 20
+        unit: percentage points
+        constraints: finite and in (0, 100]
+        description: >-
+          Additive change made by faster or slower. For example, a 20-point
+          step changes 75% to 95%, not to 90%.
+      min_percentage:
+        type: number
+        default: 20
+        unit: percent (%)
+        constraints: finite and in (0, default_percentage]
+        description: >-
+          Lowest percentage accepted by slower or set_speed_limit. This is not
+          a stop command; cancel or the chassis stop capability must be used to
+          stop motion.
+      topic:
+        type: string
+        default: /speed_limit
+        nav2_equivalent: controller_server.ros__parameters.speed_limit_topic
+        description: >-
+          Fully-qualified ROS topic carrying nav2_msgs/SpeedLimit. It must
+          match Controller Server's speed_limit_topic. Initialization fails if
+          Nav2 does not subscribe.
+
 optional:
   bt_xml_file:
     type: path
