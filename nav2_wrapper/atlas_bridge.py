@@ -49,6 +49,7 @@ from nav2_wrapper.configuration import (
     render_python_expression_bool,
     resolve_bt_xml_file,
     resolve_bt_through_poses_xml_file,
+    resolve_controller_velocity_output_topic,
     resolve_external_velocity_guard,
     resolve_params_file,
     resolve_trajectory_log_dir,
@@ -555,7 +556,11 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     return str(target), []
 
 
-def _materialize_guarded_launch(*, external_velocity_guard: bool) -> str:
+def _materialize_guarded_launch(
+    *,
+    external_velocity_guard: bool,
+    controller_velocity_output_topic: str | None = None,
+) -> str:
     """Patch the distro launch so every Nav2 velocity crosses our final guard."""
     from ament_index_python.packages import get_package_share_directory  # type: ignore
 
@@ -563,6 +568,7 @@ def _materialize_guarded_launch(*, external_velocity_guard: bool) -> str:
     text = patch_navigation_launch(
         source.read_text(encoding="utf-8"),
         external_velocity_guard=external_velocity_guard,
+        controller_velocity_output_topic=controller_velocity_output_topic,
     )
     target = _runtime_directory() / "guarded_navigation_launch.py"
     target.write_text(text, encoding="utf-8")
@@ -613,9 +619,13 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     global _nav2_proc, _nav2_pgid
     use_composition = resolve_use_composition(cfg)
     external_velocity_guard = resolve_external_velocity_guard(cfg)
+    controller_velocity_output_topic = (
+        resolve_controller_velocity_output_topic(cfg)
+    )
     params_file, launch_remaps = _materialize_params(cfg, remap_args)
     launch_file = _materialize_guarded_launch(
-        external_velocity_guard=external_velocity_guard
+        external_velocity_guard=external_velocity_guard,
+        controller_velocity_output_topic=controller_velocity_output_topic,
     )
     # Materialize and validate every launch input before creating a child.
     # An unsupported distro launch must not leave a guard process behind.

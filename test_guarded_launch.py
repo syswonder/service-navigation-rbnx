@@ -14,6 +14,8 @@ HUMBLE_LAUNCH = Path(
 
 
 class GuardedLaunchTest(unittest.TestCase):
+    RAW_NAV_TOPIC = "/go2/robottrack/nav_cmd_vel_raw"
+
     @staticmethod
     def _package_blocks(source: str, marker: str) -> list[str]:
         starts = []
@@ -121,6 +123,67 @@ class GuardedLaunchTest(unittest.TestCase):
             patch_navigation_launch(
                 HUMBLE_LAUNCH.read_text(encoding="utf-8"),
                 external_velocity_guard="true",
+            )
+
+    def test_opt_in_raw_route_keeps_smoother_on_cmd_vel_nav(self):
+        if not HUMBLE_LAUNCH.is_file():
+            self.skipTest("ROS Humble nav2_bringup launch is not installed")
+        source = HUMBLE_LAUNCH.read_text(encoding="utf-8")
+        default_result = patch_navigation_launch(source)
+        self.assertEqual(
+            default_result,
+            patch_navigation_launch(
+                source,
+                controller_velocity_output_topic=None,
+            ),
+        )
+
+        result = patch_navigation_launch(
+            source,
+            controller_velocity_output_topic=self.RAW_NAV_TOPIC,
+        )
+        ast.parse(result)
+        controllers = self._package_blocks(
+            result, "package='nav2_controller'"
+        )
+        behaviors = self._package_blocks(
+            result, "package='nav2_behaviors'"
+        )
+        smoothers = self._package_blocks(
+            result, "package='nav2_velocity_smoother'"
+        )
+        for block in controllers + behaviors:
+            self.assertIn(
+                f"('cmd_vel', '{self.RAW_NAV_TOPIC}')", block
+            )
+            self.assertNotIn("cmd_vel_guard_input", block)
+        for block in smoothers:
+            self.assertIn("('cmd_vel', 'cmd_vel_nav')", block)
+            self.assertIn(
+                "('cmd_vel_smoothed', 'cmd_vel_guard_input')", block
+            )
+            self.assertNotIn(self.RAW_NAV_TOPIC, block)
+        self.assertEqual(
+            result.count(f"('cmd_vel', '{self.RAW_NAV_TOPIC}')"), 4
+        )
+        self.assertEqual(result.count("('cmd_vel', 'cmd_vel_nav')"), 2)
+
+    def test_opt_in_raw_route_rejects_non_absolute_topic(self):
+        if not HUMBLE_LAUNCH.is_file():
+            self.skipTest("ROS Humble nav2_bringup launch is not installed")
+        source = HUMBLE_LAUNCH.read_text(encoding="utf-8")
+        for value in ("", "cmd_vel_raw", "/", "/go2//cmd_vel"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                RuntimeError, "absolute ROS topic"
+            ):
+                patch_navigation_launch(
+                    source,
+                    controller_velocity_output_topic=value,
+                )
+        with self.assertRaisesRegex(RuntimeError, "must be a string"):
+            patch_navigation_launch(
+                source,
+                controller_velocity_output_topic=1,
             )
 
     def test_third_behavior_branch_fails_closed(self):

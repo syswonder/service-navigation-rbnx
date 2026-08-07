@@ -194,6 +194,24 @@ def resolve_velocity_output_topic(
     return validate_absolute_ros_topic(raw, field)
 
 
+def resolve_controller_velocity_output_topic(cfg: dict) -> str | None:
+    """Resolve the optional pre-smoother Nav2 producer destination.
+
+    The normal provider layout deliberately remains unchanged when this field
+    is absent: controller output is published on ``cmd_vel_nav`` and consumed
+    by Nav2's velocity smoother.  A deployment may opt into a source mux by
+    moving the raw controller and behavior producers to one fully-qualified
+    topic.  The mux is then the sole publisher on ``/cmd_vel_nav`` while the
+    smoother keeps its historical subscription.
+    """
+    if "controller_velocity_output_topic" not in cfg:
+        return None
+    return validate_absolute_ros_topic(
+        cfg["controller_velocity_output_topic"],
+        "controller_velocity_output_topic",
+    )
+
+
 def scan_projection_config(cfg: dict) -> dict[str, object]:
     raw = cfg.get("scan_projection")
     if raw is None:

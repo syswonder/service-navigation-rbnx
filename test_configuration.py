@@ -9,6 +9,7 @@ from nav2_wrapper.configuration import (
     EXTERNAL_VELOCITY_GUARD_INPUT_TOPIC,
     VELOCITY_OUTPUT_TOPIC_ENV,
     render_python_expression_bool,
+    resolve_controller_velocity_output_topic,
     resolve_external_velocity_guard,
     resolve_bt_xml_file,
     resolve_bt_through_poses_xml_file,
@@ -112,6 +113,29 @@ class DeploymentConfigurationTest(unittest.TestCase):
             resolve_velocity_output_topic({}, {}),
             DEFAULT_VELOCITY_OUTPUT_TOPIC,
         )
+
+    def test_controller_velocity_output_topic_is_strict_opt_in(self):
+        self.assertIsNone(resolve_controller_velocity_output_topic({}))
+        self.assertEqual(
+            resolve_controller_velocity_output_topic(
+                {
+                    "controller_velocity_output_topic":
+                        "/go2/robottrack/nav_cmd_vel_raw"
+                }
+            ),
+            "/go2/robottrack/nav_cmd_vel_raw",
+        )
+        for topic in (
+            "",
+            "cmd_vel_raw",
+            "/",
+            "/go2/robottrack/",
+            "/go2//nav_cmd_vel_raw",
+        ):
+            with self.subTest(topic=topic), self.assertRaises(ValueError):
+                resolve_controller_velocity_output_topic(
+                    {"controller_velocity_output_topic": topic}
+                )
 
     def test_use_composition_is_strict_and_defaults_off(self):
         self.assertFalse(resolve_use_composition({}))

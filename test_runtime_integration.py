@@ -213,6 +213,28 @@ class RuntimeIntegrationTest(unittest.TestCase):
             config,
         )
 
+    def test_controller_output_mux_route_is_opt_in_and_fully_forwarded(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        patcher = (ROOT / "nav2_wrapper" / "guarded_launch.py").read_text()
+        config = (ROOT / "nav2_wrapper" / "configuration.py").read_text()
+        spec = (ROOT / "config.spec").read_text()
+        self.assertIn(
+            "resolve_controller_velocity_output_topic(cfg)", source
+        )
+        self.assertIn(
+            "controller_velocity_output_topic="
+            "controller_velocity_output_topic",
+            source,
+        )
+        self.assertIn(
+            'cfg["controller_velocity_output_topic"]', config
+        )
+        self.assertIn("controller_velocity_output_topic:", spec)
+        self.assertIn(
+            "controller_velocity_output_topic is not None", patcher
+        )
+        self.assertIn("('cmd_vel', 'cmd_vel_nav')", patcher)
+
     def test_composition_is_owned_opt_in_and_materialized_before_children(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         patcher = (ROOT / "nav2_wrapper" / "guarded_launch.py").read_text()

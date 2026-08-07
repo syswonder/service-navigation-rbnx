@@ -33,15 +33,27 @@ def _require_exact_producer_layout(
     *,
     patched: bool,
     external_velocity_guard: bool = False,
+    controller_velocity_output_topic: str | None = None,
 ) -> None:
-    controller_remap = "remappings=remappings + [('cmd_vel', 'cmd_vel_nav')])"
+    controller_destination = (
+        controller_velocity_output_topic or "cmd_vel_nav"
+    )
+    controller_remap = (
+        "remappings=remappings + "
+        f"[('cmd_vel', '{controller_destination}')])"
+    )
     behavior_remap = (
         (
             "remappings=remappings + "
-            f"[('cmd_vel', '{EXTERNAL_BEHAVIOR_SINK}')])"
-            if external_velocity_guard
-            else "remappings=remappings + "
-            "[('cmd_vel', 'cmd_vel_guard_input')])"
+            f"[('cmd_vel', '{controller_velocity_output_topic}')])"
+            if controller_velocity_output_topic is not None
+            else (
+                "remappings=remappings + "
+                f"[('cmd_vel', '{EXTERNAL_BEHAVIOR_SINK}')])"
+                if external_velocity_guard
+                else "remappings=remappings + "
+                "[('cmd_vel', 'cmd_vel_guard_input')])"
+            )
         )
         if patched
         else "remappings=remappings)"
@@ -54,7 +66,9 @@ def _require_exact_producer_layout(
         "nav2_controller": (controller_remap, False),
         "nav2_behaviors": (
             behavior_remap,
-            patched and not external_velocity_guard,
+            patched
+            and not external_velocity_guard
+            and controller_velocity_output_topic is None,
         ),
         "nav2_velocity_smoother": (smoother_remap, patched),
     }
@@ -81,12 +95,32 @@ def _require_exact_producer_layout(
         )
         if canonical_target.search(source):
             raise RuntimeError("generated nav2 launch retains canonical cmd_vel output")
-        expected_guard_inputs = 2 if external_velocity_guard else 4
+        expected_guard_inputs = (
+            2
+            if external_velocity_guard
+            or controller_velocity_output_topic is not None
+            else 4
+        )
         if source.count("cmd_vel_guard_input") != expected_guard_inputs:
             raise RuntimeError("generated nav2 launch has unexpected guard input count")
-        if source.count("('cmd_vel', 'cmd_vel_nav')") != 4:
+        expected_cmd_vel_nav = (
+            2 if controller_velocity_output_topic is not None else 4
+        )
+        if source.count("('cmd_vel', 'cmd_vel_nav')") != expected_cmd_vel_nav:
             raise RuntimeError("generated nav2 launch has unexpected cmd_vel_nav count")
-        if external_velocity_guard:
+        if controller_velocity_output_topic is not None:
+            raw_remap = (
+                f"('cmd_vel', '{controller_velocity_output_topic}')"
+            )
+            if source.count(raw_remap) != 4:
+                raise RuntimeError(
+                    "generated nav2 launch has unexpected raw producer count"
+                )
+            if EXTERNAL_BEHAVIOR_SINK in source:
+                raise RuntimeError(
+                    "generated nav2 launch retains external behavior sink"
+                )
+        elif external_velocity_guard:
             if source.count(EXTERNAL_BEHAVIOR_SINK) != 2:
                 raise RuntimeError(
                     "generated nav2 launch has unexpected behavior sink count"
@@ -97,6 +131,7 @@ def patch_navigation_launch(
     source: str,
     *,
     external_velocity_guard: bool = False,
+    controller_velocity_output_topic: str | None = None,
 ) -> str:
     """Route every Nav2 velocity producer through the guard and own a container.
 
@@ -118,17 +153,44 @@ def patch_navigation_launch(
 
     if not isinstance(external_velocity_guard, bool):
         raise RuntimeError("external_velocity_guard must be a boolean")
+    if controller_velocity_output_topic is not None:
+        if not isinstance(controller_velocity_output_topic, str):
+            raise RuntimeError(
+                "controller_velocity_output_topic must be a string"
+            )
+        token = r"[A-Za-z_][A-Za-z0-9_]*"
+        if re.fullmatch(
+            rf"/{token}(?:/{token})*", controller_velocity_output_topic
+        ) is None:
+            raise RuntimeError(
+                "controller_velocity_output_topic must be an absolute ROS topic"
+            )
     _require_exact_producer_layout(source, patched=False)
 
     text = source
+    if controller_velocity_output_topic is not None:
+        old_controller = (
+            "remappings=remappings + [('cmd_vel', 'cmd_vel_nav')])"
+        )
+        if text.count(old_controller) != 2:
+            raise RuntimeError("unsupported nav2 controller launch layout")
+        text = text.replace(
+            old_controller,
+            "remappings=remappings + "
+            f"[('cmd_vel', '{controller_velocity_output_topic}')])",
+        )
     old_behavior = "remappings=remappings)"
     behavior_marker = "package='nav2_behaviors'"
     next_marker = "package='nav2_bt_navigator'"
     search_from = 0
     behavior_destination = (
-        EXTERNAL_BEHAVIOR_SINK
-        if external_velocity_guard
-        else "cmd_vel_guard_input"
+        controller_velocity_output_topic
+        if controller_velocity_output_topic is not None
+        else (
+            EXTERNAL_BEHAVIOR_SINK
+            if external_velocity_guard
+            else "cmd_vel_guard_input"
+        )
     )
     for _ in range(2):
         behavior_start = text.find(behavior_marker, search_from)
@@ -160,6 +222,7 @@ def patch_navigation_launch(
         text,
         patched=True,
         external_velocity_guard=external_velocity_guard,
+        controller_velocity_output_topic=controller_velocity_output_topic,
     )
 
     description_marker = "    # Create the launch description and populate\n"
