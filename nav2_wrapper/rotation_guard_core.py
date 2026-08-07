@@ -29,6 +29,7 @@ class GuardLimits:
     terminal_min_progress_rad: float = 0.04
     global_spin_timeout_s: float = 25.0
     global_spin_limit_rad: float = 2.0 * math.pi + 0.50
+    global_min_progress_rad: float = 0.04
 
 
 class RotationGuard:
@@ -45,6 +46,8 @@ class RotationGuard:
         self.latched_reason = ""
         self.spin_started_at: float | None = None
         self.spin_rotation = 0.0
+        self.spin_progress_rotation = 0.0
+        self.last_spin_progress_at: float | None = None
         self.terminal_started_at: float | None = None
         self.terminal_rotation = 0.0
         self.terminal_allowed_rotation = 0.0
@@ -60,6 +63,8 @@ class RotationGuard:
         self.latched_reason = ""
         self.spin_started_at = None
         self.spin_rotation = 0.0
+        self.spin_progress_rotation = 0.0
+        self.last_spin_progress_at = None
         self.terminal_started_at = None
         self.terminal_rotation = 0.0
         self.terminal_allowed_rotation = 0.0
@@ -102,12 +107,26 @@ class RotationGuard:
         if not self.rotating:
             self.spin_started_at = None
             self.spin_rotation = 0.0
+            self.spin_progress_rotation = 0.0
+            self.last_spin_progress_at = None
             return ""
 
         if self.spin_started_at is None:
             self.spin_started_at = now
             self.spin_rotation = 0.0
-        if now - self.spin_started_at > self.limits.global_spin_timeout_s:
+            self.spin_progress_rotation = 0.0
+            self.last_spin_progress_at = now
+        if (
+            self.spin_rotation - self.spin_progress_rotation
+            >= self.limits.global_min_progress_rad
+        ):
+            self.spin_progress_rotation = self.spin_rotation
+            self.last_spin_progress_at = now
+        if (
+            self.last_spin_progress_at is not None
+            and now - self.last_spin_progress_at
+            > self.limits.global_spin_timeout_s
+        ):
             return self._trip("continuous stationary rotation timeout")
         if self.spin_rotation > self.limits.global_spin_limit_rad:
             return self._trip("continuous stationary rotation limit")

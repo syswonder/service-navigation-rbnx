@@ -74,6 +74,14 @@ class VelocityGuardNode(Node):
         self._robot_pose = None
         self._goal_pose = None
         self._last_cmd = (0.0, 0.0)
+        self._last_cmd_at = None
+        self._command_timeout_s = float(
+            os.getenv("ROBONIX_GUARD_COMMAND_TIMEOUT_S", "0.15")
+        )
+        if not math.isfinite(self._command_timeout_s) or not 0.0 < self._command_timeout_s <= 0.2:
+            raise RuntimeError(
+                "ROBONIX_GUARD_COMMAND_TIMEOUT_S must be finite and in (0.0, 0.2]"
+            )
         self._cancel_sent = False
         self._trace = None
         self._trace_dir = Path(os.getenv("ROBONIX_NAV_TRACE_DIR", "/tmp/robonix-nav-traces"))
@@ -105,11 +113,12 @@ class VelocityGuardNode(Node):
             20,
         )
         self._cancel = self.create_client(CancelGoal, "/navigate_to_pose/_action/cancel_goal")
-        self.create_timer(0.05, self._publish_latched_zero)
+        self.create_timer(0.05, self._publish_required_zero)
         self.get_logger().info(
             f"guard active; output={output_topic}; "
             f"max_linear={max_linear_speed_mps:g}m/s; "
-            f"default={default_percentage:g}%; traces={self._trace_dir}"
+            f"default={default_percentage:g}%; "
+            f"command_timeout={self._command_timeout_s:.3f}s; traces={self._trace_dir}"
         )
 
     def _on_speed_limit(self, msg: SpeedLimit) -> None:
@@ -274,6 +283,7 @@ class VelocityGuardNode(Node):
 
     def _on_cmd(self, msg: Twist) -> None:
         with self._lock:
+            self._last_cmd_at = time.monotonic()
             x, y, limited = bounded_linear_velocity(
                 float(msg.linear.x),
                 float(msg.linear.y),
@@ -321,9 +331,13 @@ class VelocityGuardNode(Node):
         self._cancel.call_async(request)
         self._event("cancel_requested", uuid=self._active_uuid)
 
-    def _publish_latched_zero(self) -> None:
+    def _publish_required_zero(self) -> None:
         with self._lock:
-            if self.guard.latched_reason:
+            command_stale = (
+                self._last_cmd_at is None
+                or time.monotonic() - self._last_cmd_at >= self._command_timeout_s
+            )
+            if self.guard.latched_reason or command_stale:
                 self._pub.publish(Twist())
 
 
