@@ -20,6 +20,11 @@ service:
         map: mapping
         odom: chassis
         scan: lidar
+      dynamic_speed:
+        max_linear_speed_mps: 0.3
+        default_percentage: 75
+        step_percentage: 20
+        min_percentage: 20
 ```
 
 Relative paths are resolved from the directory containing
@@ -56,6 +61,25 @@ Set `config.velocity_output_topic` to a fully-qualified non-motion sink such as
 config field is absent; an explicit empty, relative, or malformed topic fails
 startup before the guard creates any ROS endpoint.
 
+Dynamic speed config uses Nav2-compatible SI semantics.
+`max_linear_speed_mps` is the actual hard planar limit
+`sqrt(vx^2 + vy^2)` in m/s after considering both the selected controller's
+`max_speed_xy` and stricter per-axis limits. The final velocity guard
+independently enforces this linear limit. `default_percentage` scales that
+maximum, so the example starts at `0.225 m/s`. `step_percentage` is an additive
+number of percentage points. Angular constraints such as DWB's
+`max_vel_theta` stay in the deploy-owned Nav2 YAML; a controller may
+proportionally adjust its internal kinematics when it processes a Nav2 speed
+limit, but Robonix does not expose a separate angular-speed policy here.
+
+`adjust_speed` handles `faster`, `slower`, and `normal`;
+`set_speed_limit` applies an explicit percentage; and `get_speed_limit` reads
+the current and configured state. By default a mutation belongs to the
+selected active run and automatically restores the session limit when that run
+terminates. `persist=true` deliberately changes the provider-session limit
+across navigation runs. None of these operations restart Navigation, cancel a
+goal, or resubmit it.
+
 ## Runtime
 
 At `Driver(CMD_INIT)`, the wrapper:
@@ -64,7 +88,8 @@ At `Driver(CMD_INIT)`, the wrapper:
 2. resolves and materializes the deployment-owned Nav2 YAML;
 3. starts an optional PointCloud2-to-LaserScan adapter;
 4. starts Nav2 and waits for the `navigate_to_pose` action server;
-5. exposes navigate, status, and cancel capabilities.
+5. connects to Nav2's live `speed_limit` subscriber;
+6. exposes navigate, status, cancel, and dynamic speed capabilities.
 
 Missing required providers return `deferred`. Invalid config or a Nav2 startup
 failure returns `error` and tears down every child process.
@@ -84,7 +109,9 @@ python3 -m unittest -v \
   test_configuration.py \
   test_runtime_integration.py \
   test_rotation_guard.py \
-  test_scan_filter.py
+  test_scan_filter.py \
+  test_speed_control.py \
+  test_velocity_limit.py
 ```
 
 Jetson native builds require ROS 2 Humble and Nav2 packages compatible with the

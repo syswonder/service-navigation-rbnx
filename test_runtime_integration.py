@@ -126,6 +126,52 @@ class RuntimeIntegrationTest(unittest.TestCase):
         self.assertIn('"${ROBONIX_VELOCITY_OUTPUT_TOPIC+x}" == "x"', start)
         self.assertIn('"${VELOCITY_OUTPUT_ARGS[@]}"', start)
 
+    def test_dynamic_speed_uses_nav2_live_speed_limit_without_replacing_goal(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
+        manifests = [
+            (ROOT / name).read_text()
+            for name in (
+                "package_manifest.yaml",
+                "package_manifest.jetson-docker.yaml",
+                "package_manifest.jetson-native.yaml",
+            )
+        ]
+
+        self.assertIn("from nav2_msgs.msg import SpeedLimit", source)
+        self.assertIn(
+            "node.create_publisher(\n            _SpeedLimit, settings.topic, 10",
+            source,
+        )
+        self.assertIn(
+            "_GUARD_SPEED_LIMIT_TOPIC = "
+            '"/robonix/navigation/speed_limit_guard"',
+            source,
+        )
+        self.assertIn("guard_publisher.publish(message)", source)
+        self.assertIn("ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC", guard)
+        self.assertIn("def _speed_channels_available()", source)
+        self.assertIn("node.create_timer(1.0, _refresh_speed_subscriber)", source)
+        self.assertNotIn("node.create_timer(1.0, _republish_speed_limit)", source)
+        self.assertIn("def _adjust_speed_impl(", source)
+        self.assertIn("def _set_speed_limit_impl(", source)
+        self.assertIn("def _get_speed_limit_impl()", source)
+        self.assertIn("_publish_speed_limit(decision.percentage)", source)
+        speed_source = source[source.index("def _adjust_speed_impl"):]
+        self.assertNotIn("_nav_queue.put", speed_source)
+        self.assertIn("ROBONIX_NAV_MAX_LINEAR_SPEED_MPS", source)
+        self.assertIn("bounded_linear_velocity(", guard)
+        for manifest in manifests:
+            self.assertIn("robonix/service/navigation/adjust_speed", manifest)
+            self.assertIn(
+                "robonix/service/navigation/set_speed_limit",
+                manifest,
+            )
+            self.assertIn(
+                "robonix/service/navigation/get_speed_limit",
+                manifest,
+            )
+
     def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))

@@ -48,6 +48,13 @@ RUN apt-get update \
         ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 
+# The pip shipped with the ROS Humble base image (22.x) crashes while resolving
+# the set below: pip/_internal/resolution/resolvelib/resolver.py raises
+# AssertionError in get_topological_weights. That is a resolver bug rather than
+# a conflict between these requirements, and it is fixed in newer pip, so
+# upgrade before resolving anything.
+RUN pip install --no-cache-dir --upgrade 'pip>=24'
+
 # grpcio-tools 1.83+ needs setuptools>=77, while ROS colcon-core requires <80.
 RUN pip install --no-cache-dir \
         'setuptools>=77,<80' \
