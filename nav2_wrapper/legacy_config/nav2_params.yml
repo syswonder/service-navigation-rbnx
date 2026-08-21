@@ -151,6 +151,10 @@ local_costmap:
         observation_sources: scan
         scan:
           topic: /scanner/scan
+          # MID-360 conversion emits inf for no-return bins and the speckle
+          # filter writes inf for removed bins; without this the costmap drops
+          # those rays entirely and never clears along them.
+          inf_is_valid: true
           max_obstacle_height: 2.0
           marking: true
           clearing: true
@@ -189,6 +193,10 @@ global_costmap:
         observation_sources: scan
         scan:
           topic: /scanner/scan
+          # MID-360 conversion emits inf for no-return bins and the speckle
+          # filter writes inf for removed bins; without this the costmap drops
+          # those rays entirely and never clears along them.
+          inf_is_valid: true
           max_obstacle_height: 2.0
           marking: true
           clearing: true
