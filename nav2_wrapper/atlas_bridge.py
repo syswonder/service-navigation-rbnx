@@ -41,7 +41,7 @@ from pathlib import Path
 
 import grpc
 
-from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail
+from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail, summarize_blockage
 from nav2_wrapper.configuration import (
     resolve_bt_xml_file,
     resolve_params_file,
@@ -147,6 +147,8 @@ _nav_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 _goal_states: dict[str, dict] = {}
 _goal_handles: dict[str, object] = {}
 _nav_diagnostics: deque[str] = deque(maxlen=12)
+# (data, width, height, resolution) of the latest local costmap grid.
+_local_costmap_snapshot: "tuple[list[int], int, int, float] | None" = None
 _last_run_id = ""
 _speed_publisher = None
 _guard_speed_publisher = None
@@ -517,6 +519,27 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     target = runtime_dir / f"nav2_params_{_cap_id}.yaml"
     target.write_text(text, encoding="utf-8")
     log.info("materialized nav2 params %s -> %s", source, target)
+    # Field debugging works off the packaged logs/ directory alone, so echo
+    # the EFFECTIVE configuration into stdout once at startup: the resolved
+    # params (post-token substitution) and the behavior tree actually loaded.
+    # Without this a log bundle shows failures but never the config that
+    # produced them.
+    log.info("==== effective nav2 params (%s) begin ====", target.name)
+    for line in text.splitlines():
+        log.info("nav2-params| %s", line)
+    log.info("==== effective nav2 params end ====")
+    bt_path = replacements.get("__ROBONIX_BT_XML__", "")
+    if bt_path:
+        try:
+            bt_text = Path(bt_path).read_text(encoding="utf-8")
+            log.info("==== effective behavior tree (%s) begin ====", bt_path)
+            for line in bt_text.splitlines():
+                log.info("nav2-bt| %s", line)
+            log.info("==== effective behavior tree end ====")
+        except OSError as e:
+            log.warning("behavior tree %s unreadable for log echo: %s", bt_path, e)
+    else:
+        log.info("behavior tree: nav2 default (no __ROBONIX_BT_XML__ override)")
     # Target-specific profiles consume Atlas bindings inside the generated
     # params file. They must not be passed as undeclared launch arguments.
     return str(target), []
@@ -729,6 +752,20 @@ def _start_ros2_thread() -> None:
         if settings is None:
             raise RuntimeError("dynamic speed settings are not initialized")
         _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
+        # Latest local costmap snapshot for failure diagnostics. The rolling
+        # window is robot-centred, so its centre stands in for the pose.
+        from nav_msgs.msg import OccupancyGrid as _OccupancyGrid
+
+        def _on_local_costmap(msg):
+            global _local_costmap_snapshot
+            _local_costmap_snapshot = (
+                list(msg.data), msg.info.width, msg.info.height,
+                msg.info.resolution,
+            )
+
+        node.create_subscription(
+            _OccupancyGrid, "local_costmap/costmap", _on_local_costmap, 1
+        )
         _speed_publisher = node.create_publisher(
             _SpeedLimit, settings.topic, 10
         )
@@ -978,6 +1015,11 @@ def _result_cb(fut, gid: str):
         with _state_lock:
             previous = _goal_states.get(gid, {})
             diagnostics = list(_nav_diagnostics) if state == "FAILED" else []
+            if state == "FAILED" and _local_costmap_snapshot is not None:
+                blockage = summarize_blockage(*_local_costmap_snapshot)
+                if blockage:
+                    diagnostics.append(blockage)
+                    log.warning("[nav-diag] %s", blockage)
             _goal_states[gid] = {
                 "state": state,
                 "detail": format_result_detail(

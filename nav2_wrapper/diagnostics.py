@@ -54,3 +54,45 @@ def format_result_detail(
     if unique:
         parts.append("nav2=" + " | ".join(unique[-3:]))
     return "; ".join(parts)
+
+
+def summarize_blockage(
+    data: "list[int]",
+    width: int,
+    height: int,
+    resolution: float,
+    threshold: int = 99,
+    radius_m: float = 1.5,
+) -> str:
+    """One-line blockage report from a robot-centred rolling OccupancyGrid.
+
+    The local costmap window is centred on the robot, so the grid centre
+    stands in for the robot pose and no TF lookup is needed. Reports the
+    nearest cell at or above `threshold` (occupancy 0-100 scale; 100 is
+    lethal, inscribed-inflation publishes 99) plus how many such cells sit
+    within `radius_m`. Empty string when the grid is unusable.
+    """
+    import math as _math
+
+    if width <= 0 or height <= 0 or resolution <= 0 or len(data) < width * height:
+        return ""
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    nearest = None  # (distance_m, bearing_deg)
+    within = 0
+    for iy in range(height):
+        row = iy * width
+        for ix in range(width):
+            if data[row + ix] < threshold:
+                continue
+            d = _math.hypot(ix - cx, iy - cy) * resolution
+            if d <= radius_m:
+                within += 1
+            if nearest is None or d < nearest[0]:
+                bearing = _math.degrees(_math.atan2(iy - cy, ix - cx))
+                nearest = (d, bearing)
+    if nearest is None:
+        return f"local costmap: no cells >= {threshold} in the window"
+    return (
+        f"local costmap: nearest blocked cell {nearest[0]:.2f}m at "
+        f"{nearest[1]:.0f}deg, {within} blocked cells within {radius_m:.1f}m"
+    )
