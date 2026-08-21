@@ -492,6 +492,27 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     target = runtime_dir / f"nav2_params_{_cap_id}.yaml"
     target.write_text(text, encoding="utf-8")
     log.info("materialized nav2 params %s -> %s", source, target)
+    # Field debugging works off the packaged logs/ directory alone, so echo
+    # the EFFECTIVE configuration into stdout once at startup: the resolved
+    # params (post-token substitution) and the behavior tree actually loaded.
+    # Without this a log bundle shows failures but never the config that
+    # produced them.
+    log.info("==== effective nav2 params (%s) begin ====", target.name)
+    for line in text.splitlines():
+        log.info("nav2-params| %s", line)
+    log.info("==== effective nav2 params end ====")
+    bt_path = replacements.get("__ROBONIX_BT_XML__", "")
+    if bt_path:
+        try:
+            bt_text = Path(bt_path).read_text(encoding="utf-8")
+            log.info("==== effective behavior tree (%s) begin ====", bt_path)
+            for line in bt_text.splitlines():
+                log.info("nav2-bt| %s", line)
+            log.info("==== effective behavior tree end ====")
+        except OSError as e:
+            log.warning("behavior tree %s unreadable for log echo: %s", bt_path, e)
+    else:
+        log.info("behavior tree: nav2 default (no __ROBONIX_BT_XML__ override)")
     # Target-specific profiles consume Atlas bindings inside the generated
     # params file. They must not be passed as undeclared launch arguments.
     return str(target), []
