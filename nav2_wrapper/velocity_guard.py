@@ -21,6 +21,7 @@ from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 
+from nav2_wrapper.cmd_vel_summary import CmdVelSummary
 from nav2_wrapper.configuration import resolve_velocity_output_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 from nav2_wrapper.velocity_limit import bounded_linear_velocity
@@ -74,6 +75,7 @@ class VelocityGuardNode(Node):
         self._robot_pose = None
         self._goal_pose = None
         self._last_cmd = (0.0, 0.0)
+        self._cmd_summary = CmdVelSummary()
         self._cancel_sent = False
         self._trace = None
         self._trace_dir = Path(os.getenv("ROBONIX_NAV_TRACE_DIR", "/tmp/robonix-nav-traces"))
@@ -289,8 +291,9 @@ class VelocityGuardNode(Node):
                 output.angular.y = msg.angular.y
                 output.angular.z = msg.angular.z
             self._last_cmd = (math.hypot(x, y), float(output.angular.z))
+            now_s = self.get_clock().now().nanoseconds / 1e9
             reason = self.guard.evaluate(
-                self.get_clock().now().nanoseconds / 1e9,
+                now_s,
                 self._last_cmd[0], self._last_cmd[1], self._robot_pose, self._goal_pose,
             )
             self._event(
@@ -302,6 +305,10 @@ class VelocityGuardNode(Node):
                 continuous_rotation=self.guard.spin_rotation,
                 latched=bool(reason),
             )
+            line = self._cmd_summary.observe(
+                now_s, self._last_cmd[0], self._last_cmd[1], limited, bool(reason))
+            if line:
+                self.get_logger().info(line)
             if reason:
                 self._trip(reason)
                 self._pub.publish(Twist())
