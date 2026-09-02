@@ -228,6 +228,12 @@ class RuntimeIntegrationTest(unittest.TestCase):
         )
         self.assertIn("missing runtime-compatible protobuf stubs", entrypoint)
 
+    def test_docker_runtime_stays_on_mcp_v1(self):
+        """Keep robonix-api's mcp.server.fastmcp import available."""
+        dockerfile = (ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("'mcp>=1.0,<2'", dockerfile)
+        self.assertIn("'fastmcp>=3,<4'", dockerfile)
+
     def test_codegen_is_mcp_only_for_every_deployment_target(self):
         build = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
         native_start = (ROOT / "scripts" / "start_native.sh").read_text(
