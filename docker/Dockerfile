@@ -56,12 +56,14 @@ RUN apt-get update \
 RUN pip install --no-cache-dir --upgrade 'pip>=24'
 
 # grpcio-tools 1.83+ needs setuptools>=77, while ROS colcon-core requires <80.
+# MCP 2.0 removed mcp.server.fastmcp, which the mounted robonix-api imports.
+# Keep the known-compatible MCP 1.x baseline.
 RUN pip install --no-cache-dir \
         'setuptools>=77,<80' \
         grpcio>=1.60.0 \
         grpcio-tools>=1.60.0 \
-        mcp>=1.0 \
-        fastmcp>=3 \
+        'mcp>=1.28.1,<2' \
+        'fastmcp>=3,<4' \
         protobuf>=4.25.0 \
         pyyaml>=6.0
 
