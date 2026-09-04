@@ -189,6 +189,15 @@ optional:
       Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
       The deployment config takes priority over the environment. Empty,
       relative, private, substituted, or malformed topic names fail startup.
+  controller_velocity_output_topic:
+    type: string
+    description: >-
+      Optional fully-qualified topic for raw Nav2 controller and behavior
+      velocity output. When omitted, the historical cmd_vel_nav route is
+      unchanged. When set, a deployment-owned source mux must be the sole
+      publisher on /cmd_vel_nav; Nav2's velocity_smoother continues to
+      subscribe to cmd_vel_nav and the final guard/output route is unchanged.
+      Empty, relative, private, substituted, or malformed topic names fail startup.
   guard_terminal_xy_m:
     type: number
     default: 0.45
