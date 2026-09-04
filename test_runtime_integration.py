@@ -172,6 +172,25 @@ class RuntimeIntegrationTest(unittest.TestCase):
                 manifest,
             )
 
+    def test_controller_output_mux_route_is_opt_in_and_fully_forwarded(self):
+        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
+        config = (ROOT / "nav2_wrapper" / "configuration.py").read_text()
+        spec = (ROOT / "config.spec").read_text()
+        self.assertIn(
+            "resolve_controller_velocity_output_topic(cfg)", source
+        )
+        self.assertIn(
+            "controller_velocity_output_topic="
+            "controller_velocity_output_topic",
+            source,
+        )
+        self.assertIn(
+            'cfg["controller_velocity_output_topic"]', config
+        )
+        self.assertIn("controller_velocity_output_topic:", spec)
+        self.assertIn("old_controller", source)
+        self.assertIn("('cmd_vel', 'cmd_vel_nav')", source)
+
     def test_invalid_velocity_topic_is_rejected_before_dependency_discovery(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         validation = source.index("resolve_velocity_output_topic(cfg)", source.index("def init"))
