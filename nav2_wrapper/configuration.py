@@ -120,6 +120,16 @@ def resolve_velocity_output_topic(
     return validate_absolute_ros_topic(raw, field)
 
 
+def resolve_controller_velocity_output_topic(cfg: dict) -> str | None:
+    """Resolve the optional pre-smoother Nav2 producer destination."""
+    if "controller_velocity_output_topic" not in cfg:
+        return None
+    return validate_absolute_ros_topic(
+        cfg["controller_velocity_output_topic"],
+        "controller_velocity_output_topic",
+    )
+
+
 def scan_projection_config(cfg: dict) -> dict[str, object]:
     raw = cfg.get("scan_projection")
     if raw is None:

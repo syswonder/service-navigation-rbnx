@@ -44,6 +44,7 @@ import grpc
 from nav2_wrapper.diagnostics import classify_nav2_line, format_result_detail, summarize_blockage
 from nav2_wrapper.configuration import (
     resolve_bt_xml_file,
+    resolve_controller_velocity_output_topic,
     resolve_params_file,
     resolve_velocity_output_topic,
     scan_projection_config,
@@ -545,12 +546,25 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     return str(target), []
 
 
-def _materialize_guarded_launch() -> str:
+def _materialize_guarded_launch(
+    *, controller_velocity_output_topic: str | None = None
+) -> str:
     """Patch the distro launch so every Nav2 velocity crosses our final guard."""
     from ament_index_python.packages import get_package_share_directory  # type: ignore
 
     source = Path(get_package_share_directory("nav2_bringup")) / "launch" / "navigation_launch.py"
     text = source.read_text(encoding="utf-8")
+    if controller_velocity_output_topic is not None:
+        old_controller = (
+            "remappings=remappings + [('cmd_vel', 'cmd_vel_nav')])"
+        )
+        if text.count(old_controller) != 2:
+            raise RuntimeError("unsupported nav2 controller launch layout")
+        text = text.replace(
+            old_controller,
+            "remappings=remappings + "
+            f"[('cmd_vel', '{controller_velocity_output_topic}')])",
+        )
     old_behavior = "remappings=remappings)"
     behavior_marker = "package='nav2_behaviors'"
     search_from = 0
@@ -560,9 +574,19 @@ def _materialize_guarded_launch() -> str:
         behavior = text[behavior_start:behavior_end]
         if behavior.count(old_behavior) != 1:
             raise RuntimeError("unsupported nav2 behavior_server launch layout")
+        if controller_velocity_output_topic is None:
+            behavior_remap = (
+                "remappings=remappings + "
+                "[('cmd_vel', 'cmd_vel_guard_input')])"
+            )
+        else:
+            behavior_remap = (
+                "remappings=remappings + "
+                f"[('cmd_vel', '{controller_velocity_output_topic}')])"
+            )
         behavior = behavior.replace(
             old_behavior,
-            "remappings=remappings + [('cmd_vel', 'cmd_vel_guard_input')])",
+            behavior_remap,
         )
         text = text[:behavior_start] + behavior + text[behavior_end:]
         search_from = behavior_end
@@ -620,9 +644,14 @@ def _spawn_velocity_guard(cfg: dict) -> None:
 
 def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
     global _nav2_proc
+    controller_velocity_output_topic = (
+        resolve_controller_velocity_output_topic(cfg)
+    )
     params_file, launch_remaps = _materialize_params(cfg, remap_args)
     _spawn_velocity_guard(cfg)
-    launch_file = _materialize_guarded_launch()
+    launch_file = _materialize_guarded_launch(
+        controller_velocity_output_topic=controller_velocity_output_topic
+    )
     use_sim_time = "true" if cfg.get("use_sim_time", False) else "false"
     args = [
         "ros2", "launch", launch_file,

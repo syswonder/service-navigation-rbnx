@@ -7,6 +7,7 @@ from unittest.mock import patch
 from nav2_wrapper.configuration import (
     DEFAULT_VELOCITY_OUTPUT_TOPIC,
     VELOCITY_OUTPUT_TOPIC_ENV,
+    resolve_controller_velocity_output_topic,
     resolve_bt_xml_file,
     resolve_params_file,
     resolve_velocity_output_topic,
@@ -72,6 +73,29 @@ class DeploymentConfigurationTest(unittest.TestCase):
             resolve_velocity_output_topic({}, {}),
             DEFAULT_VELOCITY_OUTPUT_TOPIC,
         )
+
+    def test_controller_velocity_output_topic_is_strict_opt_in(self):
+        self.assertIsNone(resolve_controller_velocity_output_topic({}))
+        self.assertEqual(
+            resolve_controller_velocity_output_topic(
+                {
+                    "controller_velocity_output_topic":
+                        "/go2/robottrack/nav_cmd_vel_raw"
+                }
+            ),
+            "/go2/robottrack/nav_cmd_vel_raw",
+        )
+        for topic in (
+            "",
+            "cmd_vel_raw",
+            "/",
+            "/go2/robottrack/",
+            "/go2//nav_cmd_vel_raw",
+        ):
+            with self.subTest(topic=topic), self.assertRaises(ValueError):
+                resolve_controller_velocity_output_topic(
+                    {"controller_velocity_output_topic": topic}
+                )
 
     def test_velocity_output_topic_supports_env_and_config_override(self):
         environment = {
