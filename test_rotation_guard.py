@@ -48,6 +48,35 @@ class RotationGuardTest(unittest.TestCase):
         reason = guard.evaluate(1.0, 0.0, 0.2, None, None)
         self.assertEqual(reason, "continuous stationary rotation limit")
 
+    def test_global_timeout_means_no_measured_yaw_progress(self):
+        guard = RotationGuard(
+            GuardLimits(global_spin_timeout_s=2.0, global_spin_limit_rad=4.0)
+        )
+        guard.begin_goal("goal-a")
+        guard.observe_odom(0.0)
+        self.assertEqual(guard.evaluate(0.0, 0.0, 0.2, None, None), "")
+        guard.observe_odom(0.02)
+        self.assertEqual(guard.evaluate(1.0, 0.0, 0.2, None, None), "")
+        self.assertEqual(
+            guard.evaluate(2.1, 0.0, 0.2, None, None),
+            "continuous stationary rotation timeout",
+        )
+
+    def test_measured_yaw_progress_extends_global_timeout(self):
+        guard = RotationGuard(
+            GuardLimits(
+                global_spin_timeout_s=2.0,
+                global_spin_limit_rad=4.0,
+                global_min_progress_rad=0.04,
+            )
+        )
+        guard.begin_goal("goal-a")
+        guard.observe_odom(0.0)
+        self.assertEqual(guard.evaluate(0.0, 0.0, 0.2, None, None), "")
+        for now, yaw in ((1.5, 0.05), (3.0, 0.10), (4.5, 0.15)):
+            guard.observe_odom(yaw)
+            self.assertEqual(guard.evaluate(now, 0.0, 0.2, None, None), "")
+
     def test_legitimate_half_turn_is_below_global_limit(self):
         guard = RotationGuard()
         guard.begin_goal("goal-a")
