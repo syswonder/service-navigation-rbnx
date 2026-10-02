@@ -287,8 +287,8 @@ class RuntimeIntegrationTest(unittest.TestCase):
             ],
         )
         spec = (ROOT / "config.spec").read_text()
-        self.assertIn("params_file:", spec)
-        self.assertIn("path_base: directory containing robonix_manifest.yaml", spec)
+        self.assertIn("\nspecVersion: 1\n", spec)
+        self.assertIn("\n  params_file:\n", spec)
         readme = (ROOT / "README.md").read_text()
         self.assertNotIn("params_profile:", readme)
 

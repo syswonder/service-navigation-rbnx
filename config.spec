@@ -1,259 +1,348 @@
-# service-navigation-rbnx provider instance configuration
+# service-navigation-rbnx deployment config schema.
 #
-# This file documents the YAML object passed through a robot deployment entry.
-# It is a human- and model-readable contract, not a separately parsed schema.
+# rbnx delivers the deployment entry's `config:` mapping through
+# Driver(CMD_INIT). The wrapper validates it there; an invalid value returns
+# an error and stops every child process it started, and a missing map or
+# odom provider returns deferred.
+#
+# Relative file paths (params_file, bt_xml_file) resolve against the
+# directory containing robonix_manifest.yaml (RBNX_INVOCATION_CWD; the
+# package root when that variable is unset).
+#
+# Topic fields marked "absolute ROS topic name" must be "/" followed by
+# "/"-separated tokens of letters, digits and underscores, with no token
+# starting with a digit. Empty, relative, private (~), substituted ({...}),
+# or trailing-slash names fail initialization.
+specVersion: 1
+description: >-
+  Nav2 navigation service. The deployment supplies the Nav2 parameter file,
+  the Atlas providers for map, odometry and lidar, and the speed policy
+  enforced by the final velocity guard.
 
-required:
+properties:
   params_file:
-    type: path
-    path_base: directory containing robonix_manifest.yaml
-    description: Complete deploy-owned Nav2 parameter YAML.
-    example: config/nav2_params.yaml
-
-  provider_ids:
-    type: mapping[string, string]
-    description: Atlas provider IDs for Navigation inputs.
-    supported_roles:
-      map: robonix/service/map/occupancy_grid
-      odom: robonix/primitive/chassis/odom
-      scan: robonix/primitive/lidar/lidar
-      scan_cloud: robonix/primitive/lidar/lidar3d
-
-  dynamic_speed:
-    type: mapping
+    type: string
+    x-group: Nav2 parameters
     description: >-
-      Deployment-owned policy for runtime navigation speed changes. Physical
-      quantities use SI units. The provider sends percentage limits through
-      nav2_msgs/SpeedLimit to Nav2's Controller Server and independently
-      enforces the resulting planar linear-speed limit at the final velocity
-      guard. Controller-specific angular behavior remains owned by the Nav2
-      parameter file rather than this Robonix interface.
-    fields:
-      max_linear_speed_mps:
-        type: number
-        required: true
-        unit: metres per second (m/s)
-        constraints: finite and greater than 0
-        nav2_equivalent: >-
-          The effective planar ceiling formed by the selected controller's
-          max_speed_xy and per-axis max_vel_x/max_vel_y parameters.
-        description: >-
-          Deployment hard ceiling for planar linear speed
-          sqrt(vx^2 + vy^2). Set it to the actual maximum allowed by all
-          selected-controller constraints, not merely max_speed_xy when a
-          per-axis limit is stricter. For a non-holonomic DWB configuration
-          with max_vel_y=0, max_vel_x=0.3, and max_speed_xy=0.3, use 0.3.
-          The final guard never publishes a planar command above this value,
-          including commands emitted by Nav2 recovery behaviors.
-        example: 0.3
-      default_percentage:
-        type: number
-        required: true
-        unit: percent (%)
-        constraints: min_percentage <= value <= 100
-        description: >-
-          Percentage of max_linear_speed_mps applied at provider startup and
-          by a normal command. It is also the initial session limit; a
-          goal-scoped adjustment restores the current session limit when the
-          goal terminates. For example, max_linear_speed_mps=0.3 with
-          default_percentage=75 produces a planar limit of 0.225 m/s.
-        example: 75
-      step_percentage:
-        type: number
-        default: 20
-        unit: percentage points
-        constraints: finite and in (0, 100]
-        description: >-
-          Additive change made by faster or slower. For example, a 20-point
-          step changes 75% to 95%, not to 90%.
-      min_percentage:
-        type: number
-        default: 20
-        unit: percent (%)
-        constraints: finite and in (0, default_percentage]
-        description: >-
-          Lowest percentage accepted by slower or set_speed_limit. This is not
-          a stop command; cancel or the chassis stop capability must be used to
-          stop motion.
-      topic:
-        type: string
-        default: /speed_limit
-        nav2_equivalent: controller_server.ros__parameters.speed_limit_topic
-        description: >-
-          Fully-qualified ROS topic carrying nav2_msgs/SpeedLimit. It must
-          match Controller Server's speed_limit_topic. Initialization fails if
-          Nav2 does not subscribe.
+      Path to the complete Nav2 parameter YAML owned by the deployment,
+      absolute or relative to the directory containing
+      robonix_manifest.yaml. The file must exist. Required unless the
+      deprecated params_profile is set; when both are set, params_file wins.
+      If the file contains any __ROBONIX_*__ token, the wrapper writes a copy
+      with __ROBONIX_MAP_TOPIC__, __ROBONIX_ODOM_TOPIC__,
+      __ROBONIX_SCAN_TOPIC__, __ROBONIX_SCAN_CLOUD_TOPIC__ replaced by the
+      resolved input topics, __ROBONIX_FOOTPRINT__ by Soma's footprint
+      polygon, and __ROBONIX_BT_XML__ by bt_xml_file. A token that cannot be
+      resolved, or any other __ROBONIX_*__ token, fails initialization.
 
-optional:
   bt_xml_file:
-    type: path
-    path_base: directory containing robonix_manifest.yaml
+    type: string
+    x-group: Nav2 parameters
     description: >-
-      Custom BehaviorTree XML used when params_file contains the
-      __ROBONIX_BT_XML__ token.
+      Path to a BehaviorTree XML owned by the deployment, absolute or relative
+      to the directory containing robonix_manifest.yaml. It replaces the
+      __ROBONIX_BT_XML__ token in params_file; without that token it has no
+      effect. When set, the file must exist whenever params_file contains any
+      __ROBONIX_*__ token. If params_file contains __ROBONIX_BT_XML__ and this
+      key is absent, initialization fails.
 
   use_sim_time:
     type: boolean
     default: false
+    x-group: Nav2 parameters
     description: >-
-      Use ROS /clock for Nav2, the wrapper, and action timing. Enable this only
-      when the complete simulator TF and sensor graph uses simulated time.
-  action_wait_s:
-    type: number
-    default: 45.0
-    unit: seconds
+      Run Nav2 and the wrapper's ROS node on /clock simulated time. Enable it
+      only when the whole TF and sensor graph publishes simulated time. The
+      velocity guard always uses system time.
+
+  provider_ids:
+    type: object
+    x-group: Inputs
     description: >-
-      Maximum time CMD_INIT waits for Nav2's navigate_to_pose action server to
-      become ready. Expiry fails initialization and tears down the spawned
-      Nav2 and guard processes. Must be greater than zero.
+      Atlas provider id (the deployment entry name) to use for each input
+      role. A role that is absent or empty uses the first provider Atlas
+      returns for its contract. map and odom are required inputs: if no
+      provider is found, initialization is deferred until one registers. scan
+      and scan_cloud are optional and are skipped when not found. Nav2
+      receives each resolved topic only through the matching
+      __ROBONIX_*_TOPIC__ token in params_file.
+    properties:
+      map:
+        type: string
+        x-provider: robonix/service/map/occupancy_grid
+        description: Provider of the occupancy grid map.
+      odom:
+        type: string
+        x-provider: robonix/primitive/chassis/odom
+        description: Provider of odometry.
+      scan:
+        type: string
+        x-provider: robonix/primitive/lidar/lidar
+        description: >-
+          Provider of a 2D LaserScan. When this role resolves, scan_projection
+          is not started.
+      scan_cloud:
+        type: string
+        x-provider: robonix/primitive/lidar/lidar3d
+        description: >-
+          Provider of a 3D PointCloud2. Required by scan_projection.
+
+  topic_remap:
+    type: object
+    x-group: Inputs
+    description: >-
+      Fixed ROS topic for an input role, bypassing Atlas discovery for that
+      role. It takes priority over provider_ids for the same role. Values are
+      not validated. An empty value leaves the role unbound, which defers
+      initialization for map and odom. Prefer provider_ids.
+    properties:
+      map:
+        type: string
+        description: Occupancy grid map topic.
+      odom:
+        type: string
+        description: Odometry topic.
+      scan:
+        type: string
+        description: LaserScan topic.
+      scan_cloud:
+        type: string
+        description: PointCloud2 topic.
+
+  dynamic_speed:
+    type: object
+    x-group: Speed control
+    description: >-
+      Policy for runtime navigation speed changes, in SI units. The wrapper
+      sends percentage limits as nav2_msgs/SpeedLimit to Nav2's Controller
+      Server and the final velocity guard enforces the resulting planar
+      linear-speed limit independently. Angular limits stay in the Nav2
+      parameter file. Keys other than those listed fail initialization.
+    required: [max_linear_speed_mps, default_percentage]
+    properties:
+      max_linear_speed_mps:
+        type: number
+        description: >-
+          Hard ceiling, in m/s, for planar linear speed sqrt(vx^2 + vy^2).
+          Must be finite and greater than 0. Set it to the effective maximum
+          of the selected Nav2 controller: max_speed_xy, or a stricter
+          per-axis max_vel_x/max_vel_y. For a non-holonomic DWB setup with
+          max_vel_x 0.3, max_vel_y 0 and max_speed_xy 0.3, use 0.3. The final
+          guard never publishes a planar command above this value, including
+          commands from Nav2 recovery behaviors.
+      default_percentage:
+        type: number
+        maximum: 100
+        description: >-
+          Percentage of max_linear_speed_mps applied at startup and by the
+          normal command; it is also the initial session limit. A goal-scoped
+          change restores the session limit when the goal ends. Must satisfy
+          min_percentage <= default_percentage <= 100. Example: 0.3 m/s at 75%
+          gives 0.225 m/s.
+      step_percentage:
+        type: number
+        default: 20
+        maximum: 100
+        description: >-
+          Percentage points added by faster or removed by slower; 75% plus a
+          20-point step is 95%. Must be finite and greater than 0. faster
+          stops at 100.
+      min_percentage:
+        type: number
+        default: 20
+        maximum: 100
+        description: >-
+          Lowest percentage. slower stops here and set_speed_limit rejects
+          lower values. Must be greater than 0 and at most default_percentage,
+          so a default_percentage below 20 requires setting this key. It is
+          not a stop command; use cancel or the chassis stop capability.
+      topic:
+        type: string
+        default: /speed_limit
+        description: >-
+          Absolute ROS topic name carrying nav2_msgs/SpeedLimit; must equal
+          the Controller Server's speed_limit_topic. Initialization fails if
+          Nav2 does not subscribe within min(action_wait_s, 10) seconds.
 
   scan_projection:
-    type: mapping
+    type: object
+    x-group: Scan projection
     description: >-
-      Explicit PointCloud2-to-LaserScan adapter. Omit for a native LaserScan.
-    fields:
+      PointCloud2-to-LaserScan adapter for a 3D lidar. It publishes the
+      filtered scan on /scanner/scan and binds it as the scan role. Omit it
+      for a native LaserScan. When present, it is validated even if disabled,
+      and keys other than those listed fail initialization.
+    properties:
       enabled:
         type: boolean
         default: false
-        description: Enable the PointCloud2-to-LaserScan adapter.
+        description: >-
+          Start the adapter. It runs only when no scan provider resolved; it
+          then requires a resolved scan_cloud input, Soma's footprint
+          capability and the pointcloud_to_laserscan package.
       target_frame:
         type: string
-        default: Soma base_frame
         description: >-
-          TF frame in which height, range, and robot self-filtering are
-          evaluated. An empty value uses Soma's declared base frame.
+          TF frame in which point height, range and self-filtering are
+          evaluated. Absent or empty uses Soma's base_frame.
       min_height_m:
         type: number
         default: 0.0
-        unit: metres
-        description: Minimum point height retained in target_frame.
+        description: >-
+          Lowest point height kept, in metres, in target_frame. Must be less
+          than max_height_m.
       max_height_m:
         type: number
         default: 2.0
-        unit: metres
         description: >-
-          Maximum point height retained in target_frame. It must be greater
-          than min_height_m.
+          Highest point height kept, in metres, in target_frame. Must be
+          greater than min_height_m.
       range_max_m:
         type: number
         default: 30.0
-        unit: metres
-        description: Maximum projected scan range. Must be non-negative.
+        minimum: 0
+        description: Maximum projected range, in metres.
       self_filter_margin_m:
         type: number
         default: 0.05
-        unit: metres
+        minimum: 0
         description: >-
-          Extra margin added around Soma's robot footprint before points are
-          treated as returns from the robot itself. Must be non-negative.
+          Margin, in metres, added to the circumscribed radius of Soma's
+          footprint to form the scan's minimum range; closer points are
+          treated as the robot itself and dropped.
       transform_tolerance_s:
         type: number
         default: 0.15
-        unit: seconds
-        description: Allowed TF timestamp tolerance during cloud projection.
+        minimum: 0
+        description: TF timestamp tolerance for projection, in seconds.
       deskewing:
         type: boolean
         default: false
         description: >-
-          Correct motion distortion before projection. Enable only when the
-          PointCloud2 contains usable per-point timestamps and odometry/TF is
-          available for the scan interval.
+          Correct motion distortion with rtabmap_util lidar_deskewing before
+          projection. Enable it only when the cloud has per-point timestamps
+          and odometry TF covers the scan interval.
       deskew_fixed_frame:
         type: string
         default: odom
-        description: Fixed TF frame used to compensate motion during deskewing.
+        description: >-
+          Fixed TF frame for deskewing; empty also means odom. Used only when
+          deskewing is true.
       deskew_wait_for_transform_s:
         type: number
         default: 0.2
-        unit: seconds
+        minimum: 0
         description: >-
-          Maximum wait for the transforms required by deskewing. Must be
-          non-negative.
+          Maximum wait, in seconds, for the transforms deskewing needs. Used
+          only when deskewing is true.
 
-  topic_remap:
-    type: mapping[string, string]
-    description: Advanced direct ROS topic override; provider_ids is preferred.
-  trajectory_log_dir:
-    type: path
-    default: rbnx-build/data/trajectories
-    description: >-
-      Directory for per-goal JSONL trajectories and scan anomaly records.
-      Use an absolute path when traces must live outside the package build
-      directory.
   velocity_output_topic:
     type: string
-    default: /cmd_vel
-    env: ROBONIX_VELOCITY_OUTPUT_TOPIC
+    x-group: Velocity output
     description: >-
-      Fully-qualified ROS topic on which the final velocity guard publishes.
-      Set this to /robonix/nomotion/cmd_vel for motion-disabled integration.
-      The deployment config takes priority over the environment. Empty,
-      relative, private, substituted, or malformed topic names fail startup.
+      Absolute ROS topic name on which the final velocity guard publishes.
+      When absent, the ROBONIX_VELOCITY_OUTPUT_TOPIC environment variable is
+      used if set, otherwise /cmd_vel; this key takes priority over the
+      environment. Use /robonix/nomotion/cmd_vel to keep a physical robot
+      still during integration. An invalid name, including an empty one,
+      fails initialization before any provider is resolved.
+
   controller_velocity_output_topic:
     type: string
+    x-group: Velocity output
     description: >-
-      Optional fully-qualified topic for raw Nav2 controller and behavior
-      velocity output. When omitted, the historical cmd_vel_nav route is
-      unchanged. When set, a deployment-owned source mux must be the sole
-      publisher on /cmd_vel_nav; Nav2's velocity_smoother continues to
-      subscribe to cmd_vel_nav and the final guard/output route is unchanged.
-      Empty, relative, private, substituted, or malformed topic names fail startup.
+      Absolute ROS topic name for the raw velocity output of Nav2's
+      controller_server and behavior_server. When absent, the controller
+      publishes to /cmd_vel_nav and the behavior server feeds the guard
+      directly. When set, a mux owned by the deployment must be the only
+      publisher on /cmd_vel_nav; velocity_smoother still reads /cmd_vel_nav
+      and the guard and velocity_output_topic are unchanged. If the key is
+      present, an invalid value, including empty or null, fails
+      initialization.
+
+  action_wait_s:
+    type: number
+    default: 45.0
+    x-group: Startup
+    description: >-
+      Maximum time, in seconds, initialization waits for Nav2's
+      navigate_to_pose action server. On expiry initialization fails and the
+      spawned Nav2, scan and guard processes are stopped. Must be greater
+      than 0. It also caps the speed-limit subscription wait at
+      min(action_wait_s, 10) seconds.
+
+  # The guard counts the robot as rotating in place while the commanded
+  # planar speed is at most 0.05 m/s and the commanded yaw rate is at least
+  # 0.05 rad/s. When a limit trips, the guard requests cancellation of the
+  # active NavigateToPose goal and publishes zero velocity until that goal
+  # ends. The wrapper does not range-check these values; the minimums below
+  # state the meaningful range.
   guard_terminal_xy_m:
     type: number
     default: 0.45
-    unit: metres
+    minimum: 0
+    x-group: Guard
     description: >-
-      Distance from the current global-plan endpoint at which stationary
-      rotation is treated as terminal alignment and receives stricter limits.
-      Must be non-negative and should not exceed the goal checker's XY window.
+      Distance, in metres, from the current global-plan endpoint within which
+      in-place rotation counts as terminal alignment. Terminal alignment may
+      turn at most max(0.5, initial yaw error + 0.5) rad. Should not exceed
+      the goal checker's XY tolerance.
   guard_terminal_timeout_s:
     type: number
     default: 15.0
-    unit: seconds
+    minimum: 0
+    x-group: Guard
     description: >-
-      Maximum continuous terminal-alignment rotation time before the guard
-      publishes zero velocity and cancels the active navigation goal.
+      Maximum time, in seconds, from the first in-place rotation inside
+      guard_terminal_xy_m until the goal is stopped. Pauses in rotation do
+      not reset it; only a new goal does.
   guard_no_progress_s:
     type: number
     default: 3.0
-    unit: seconds
+    minimum: 0
+    x-group: Guard
     description: >-
-      Maximum terminal rotation interval without a meaningful reduction in
-      yaw error before the goal is stopped.
+      Maximum time, in seconds, during terminal alignment without the yaw
+      error to the plan endpoint dropping by more than 0.04 rad before the
+      goal is stopped.
   guard_global_spin_timeout_s:
     type: number
     default: 25.0
-    unit: seconds
+    minimum: 0
+    x-group: Guard
     description: >-
-      Maximum continuous stationary rotation time anywhere on the route,
-      including planner/controller recovery loops.
+      Maximum time, in seconds, an in-place rotation anywhere on the route,
+      including recovery loops, may continue without odometry yaw advancing
+      by at least 0.04 rad. The timer restarts on each such advance.
   guard_global_spin_limit_rad:
     type: number
     default: 6.783185307
-    unit: radians
+    minimum: 0
+    x-group: Guard
     description: >-
-      Maximum cumulative odometry rotation during one continuous stationary
-      rotation episode before the guard stops and cancels the goal. The
-      default is one full revolution plus 0.5 radian.
+      Maximum cumulative odometry yaw, in radians, during one continuous
+      in-place rotation before the goal is stopped. The default is one full
+      turn plus 0.5 rad.
 
-deprecated_compatibility:
+  trajectory_log_dir:
+    type: string
+    x-group: Diagnostics
+    description: >-
+      Directory for per-goal JSONL trajectories and scan-anomaly records,
+      written by the velocity guard. Defaults to rbnx-build/data/trajectories
+      under the package root; a relative path is relative to the package
+      root. In Docker mode the package directory is mounted at /nav2 and is
+      the only writable host mount, so use a relative path there; any other
+      path is lost when the container exits.
+
   params_profile:
     type: string
-    replacement: params_file
-    behavior: Known legacy profiles still load and emit a migration warning.
+    enum: [default, slam, sim, ranger_mini_v3]
+    x-group: Deprecated
     description: >-
-      Deprecated selector for provider-packaged parameter files. Retained so
-      existing deployments start while they migrate configuration into their
-      robot repository.
-  scan_deskewing:
-    type: boolean
-    replacement: scan_projection.deskewing
-    description: Deprecated flat alias retained for existing manifests.
-  scan_self_filter_margin_m:
-    type: number
-    replacement: scan_projection.self_filter_margin_m
-    description: Deprecated flat alias retained for existing manifests.
-  odom_frame:
-    type: string
-    replacement: scan_projection.deskew_fixed_frame
-    description: Deprecated flat alias retained for existing manifests.
+      Deprecated: use params_file. Selects a parameter file packaged with this
+      provider and logs a migration warning. An unknown value fails
+      initialization even when params_file is set. ranger_mini_v3 also
+      supplies its packaged BehaviorTree when bt_xml_file is absent.
+
+required: [dynamic_speed]
