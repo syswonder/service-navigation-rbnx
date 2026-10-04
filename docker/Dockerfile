@@ -48,6 +48,23 @@ RUN apt-get update \
         ros-humble-rmw-zenoh-cpp \
  && rm -rf /var/lib/apt/lists/*
 
+# tf2 0.25.23, from the humble sync of 2026-09-07, can deadlock a node's TF
+# buffer: waitForTransform and the listener's testTransformableRequests take
+# the same two locks in opposite order (ros2/geometry2#982). The buffer then
+# stops taking transforms, so costmaps and SLAM work from a frozen robot pose.
+# 0.25.24 fixes it and so far only ros2-testing carries it. Remove this step
+# once the main repository has 0.25.24.
+RUN set -eux; \
+    sed -e 's|^URIs: .*|URIs: http://packages.ros.org/ros2-testing/ubuntu|' \
+        -e 's|^Types: .*|Types: deb|' \
+        /etc/apt/sources.list.d/ros2.sources > /etc/apt/sources.list.d/ros2-testing.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends --only-upgrade \
+        $(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'ros-humble-tf2*' | awk '$1 == "ii" {print $2}'); \
+    rm /etc/apt/sources.list.d/ros2-testing.sources; \
+    rm -rf /var/lib/apt/lists/*; \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ros-humble-tf2-ros)" ge 0.25.24
+
 # The pip shipped with the ROS Humble base image (22.x) crashes while resolving
 # the set below: pip/_internal/resolution/resolvelib/resolver.py raises
 # AssertionError in get_topological_weights. That is a resolver bug rather than
