@@ -34,7 +34,8 @@ RUN set -eux; \
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Nav2 stack + tf + the pointcloud→laserscan adapter (for 3D-lidar-only
-# robots whose costmap wants a LaserScan).
+# robots whose costmap wants a LaserScan) + the voxel layer and numpy that
+# depth-camera obstacles use.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         python3-pip \
@@ -43,6 +44,8 @@ RUN apt-get update \
         ros-humble-nav2-bringup \
         ros-humble-tf2-ros \
         ros-humble-pointcloud-to-laserscan \
+        ros-humble-spatio-temporal-voxel-layer \
+        python3-numpy \
         ros-humble-rtabmap-util \
         ros-humble-rmw-cyclonedds-cpp \
         ros-humble-rmw-zenoh-cpp \

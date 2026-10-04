@@ -115,7 +115,11 @@ class RuntimeIntegrationTest(unittest.TestCase):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         guard = (ROOT / "nav2_wrapper" / "velocity_guard.py").read_text()
         self.assertIn("('cmd_vel', 'cmd_vel_guard_input')", source)
-        self.assertIn("('cmd_vel_smoothed', 'cmd_vel_guard_input')", source)
+        # The smoother feeds the guard, through the Collision Monitor when
+        # the deployment configures one.
+        self.assertIn("('cmd_vel_smoothed', '{smoothed}')", source)
+        self.assertIn('smoothed = _COLLISION_MONITOR_INPUT if collision_monitor else "cmd_vel_guard_input"', source)
+        self.assertIn('ros["cmd_vel_out_topic"] = "cmd_vel_guard_input"', source)
         self.assertIn('"-m", "nav2_wrapper.velocity_guard"', source)
         self.assertIn('output_topic = resolve_velocity_output_topic(cfg)', source)
         self.assertIn('"ROBONIX_VELOCITY_OUTPUT_TOPIC": output_topic', source)
