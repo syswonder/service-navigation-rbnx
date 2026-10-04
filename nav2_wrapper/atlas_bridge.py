@@ -134,6 +134,8 @@ _velocity_guard_proc: subprocess.Popen | None = None
 _scan_projector_proc: subprocess.Popen | None = None
 _scan_deskew_proc: subprocess.Popen | None = None
 _scan_filter_proc: subprocess.Popen | None = None
+_depth_cloud_proc: subprocess.Popen | None = None
+_collision_monitor_proc: subprocess.Popen | None = None
 _initialized = False
 
 # ROS2 client state (initialized inside Driver.Init after nav2 is alive)
@@ -479,6 +481,48 @@ def _soma_footprint() -> str:
     return _soma_footprint_info()[0]
 
 
+# Where the depth camera's cloud is published for the costmaps and Collision
+# Monitor, when the deployment's Nav2 parameters ask for it.
+_DEPTH_CLOUD_TOPIC = "/robonix/navigation/depth_points"
+
+
+def _start_depth_cloud(cfg: dict) -> str:
+    """Run the depth-to-cloud node on the camera `provider_ids.depth` names.
+
+    The image and its intrinsics come from the same provider, so a deployment
+    with two cameras pins one; with one camera Atlas has a single answer."""
+    global _depth_cloud_proc
+    provider = str((cfg.get("provider_ids") or {}).get("depth") or "")
+    image = _resolve_dep("robonix/primitive/camera/depth", provider)
+    info = _resolve_dep("robonix/primitive/camera/intrinsics", provider)
+    if not image or not info:
+        raise RuntimeError(
+            "the Nav2 parameters use __ROBONIX_DEPTH_CLOUD_TOPIC__ but no provider "
+            f"offers robonix/primitive/camera/depth and camera/intrinsics{f' as {provider}' if provider else ''}"
+        )
+    tuning = cfg.get("depth_obstacles") or {}
+    env = os.environ.copy()
+    env.update({
+        "ROBONIX_DEPTH_IMAGE_TOPIC": image,
+        "ROBONIX_DEPTH_INFO_TOPIC": info,
+        "ROBONIX_DEPTH_CLOUD_OUT": _DEPTH_CLOUD_TOPIC,
+        "ROBONIX_DEPTH_STRIDE": str(tuning.get("stride", 4)),
+        "ROBONIX_DEPTH_MIN_RANGE_M": str(tuning.get("min_range_m", 0.2)),
+        "ROBONIX_DEPTH_MAX_RANGE_M": str(tuning.get("max_range_m", 4.0)),
+        "ROBONIX_DEPTH_RATE_HZ": str(tuning.get("rate_hz", 10)),
+    })
+    _depth_cloud_proc = subprocess.Popen(
+        [sys.executable, "-m", "nav2_wrapper.depth_cloud"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env=env,
+    )
+    threading.Thread(target=_pump_output, args=(_depth_cloud_proc.stdout, "depth_cloud"), daemon=True).start()
+    log.info("depth obstacles: %s + %s -> %s", image, info, _DEPTH_CLOUD_TOPIC)
+    return _DEPTH_CLOUD_TOPIC
+
+
 def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]:
     """Fill Atlas topic and Soma body tokens in target-specific profiles."""
     source = resolve_params_file(cfg)
@@ -502,6 +546,8 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     }
     if "__ROBONIX_FOOTPRINT__" in text:
         replacements["__ROBONIX_FOOTPRINT__"] = _soma_footprint()
+    if "__ROBONIX_DEPTH_CLOUD_TOPIC__" in text:
+        replacements["__ROBONIX_DEPTH_CLOUD_TOPIC__"] = _start_depth_cloud(cfg)
 
     for token, value in replacements.items():
         if token in text:
@@ -546,8 +592,46 @@ def _materialize_params(cfg: dict, bindings: list[str]) -> tuple[str, list[str]]
     return str(target), []
 
 
+# Between the velocity smoother and the guard when the deployment configures
+# Nav2's Collision Monitor: it stops or slows the robot before anything its
+# sources see inside its zones, whatever the controller planned.
+_COLLISION_MONITOR_INPUT = "cmd_vel_collision_input"
+
+
+def _pin_collision_monitor(params_file: str) -> str | None:
+    """With a `collision_monitor` section in the parameters, fix its topics to
+    this wrapper's chain and return the file to run it with; else None."""
+    import yaml
+
+    params = yaml.safe_load(Path(params_file).read_text(encoding="utf-8")) or {}
+    monitor = params.get("collision_monitor")
+    if not isinstance(monitor, dict):
+        return None
+    ros = monitor.setdefault("ros__parameters", {})
+    ros["cmd_vel_in_topic"] = _COLLISION_MONITOR_INPUT
+    ros["cmd_vel_out_topic"] = "cmd_vel_guard_input"
+    target = _pkg_root / "rbnx-build" / "runtime" / f"collision_monitor_{_cap_id}.yaml"
+    target.write_text(yaml.safe_dump({"collision_monitor": monitor}, sort_keys=False), encoding="utf-8")
+    return str(target)
+
+
+def _spawn_collision_monitor(params_file: str, use_sim_time: str) -> None:
+    global _collision_monitor_proc
+    _collision_monitor_proc = subprocess.Popen(
+        [
+            "ros2", "launch", "nav2_collision_monitor", "collision_monitor_node.launch.py",
+            f"use_sim_time:={use_sim_time}", f"params_file:={params_file}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    threading.Thread(target=_pump_output, args=(_collision_monitor_proc.stdout, "collision_monitor"), daemon=True).start()
+    log.info("collision monitor between the velocity smoother and the guard (%s)", params_file)
+
+
 def _materialize_guarded_launch(
-    *, controller_velocity_output_topic: str | None = None
+    *, controller_velocity_output_topic: str | None = None, collision_monitor: bool = False
 ) -> str:
     """Patch the distro launch so every Nav2 velocity crosses our final guard."""
     from ament_index_python.packages import get_package_share_directory  # type: ignore
@@ -591,7 +675,8 @@ def _materialize_guarded_launch(
         text = text[:behavior_start] + behavior + text[behavior_end:]
         search_from = behavior_end
     old_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')])"
-    new_smoother = "[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel_guard_input')])"
+    smoothed = _COLLISION_MONITOR_INPUT if collision_monitor else "cmd_vel_guard_input"
+    new_smoother = f"[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', '{smoothed}')])"
     if text.count(old_smoother) != 2:
         raise RuntimeError("unsupported nav2 velocity_smoother launch layout")
     text = text.replace(old_smoother, new_smoother)
@@ -648,11 +733,15 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
         resolve_controller_velocity_output_topic(cfg)
     )
     params_file, launch_remaps = _materialize_params(cfg, remap_args)
+    monitor_params = _pin_collision_monitor(params_file)
     _spawn_velocity_guard(cfg)
     launch_file = _materialize_guarded_launch(
-        controller_velocity_output_topic=controller_velocity_output_topic
+        controller_velocity_output_topic=controller_velocity_output_topic,
+        collision_monitor=monitor_params is not None,
     )
     use_sim_time = "true" if cfg.get("use_sim_time", False) else "false"
+    if monitor_params is not None:
+        _spawn_collision_monitor(monitor_params, use_sim_time)
     args = [
         "ros2", "launch", launch_file,
         f"use_sim_time:={use_sim_time}",
@@ -675,8 +764,21 @@ def _spawn_nav2(cfg: dict, remap_args: list[str]) -> None:
 
 
 def _kill_nav2() -> None:
-    global _velocity_guard_proc
+    global _velocity_guard_proc, _depth_cloud_proc, _collision_monitor_proc
     _kill_scan_projector()
+    helpers = (_depth_cloud_proc, _collision_monitor_proc)
+    _depth_cloud_proc = _collision_monitor_proc = None
+    for helper in helpers:
+        if helper is None or helper.poll() is not None:
+            continue
+        try:
+            os.killpg(helper.pid, signal.SIGTERM)
+            helper.wait(timeout=5.0)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(helper.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     p = _nav2_proc
     if p is not None and p.poll() is None:
         try:

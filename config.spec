@@ -86,6 +86,48 @@ properties:
         x-provider: robonix/primitive/lidar/lidar3d
         description: >-
           Provider of a 3D PointCloud2. Required by scan_projection.
+      depth:
+        type: string
+        x-provider: robonix/primitive/camera/depth
+        description: >-
+          Camera whose depth image and intrinsics (camera/intrinsics from the
+          same provider) become obstacles the lidar cannot see, such as table
+          tops. Used only when params_file contains
+          __ROBONIX_DEPTH_CLOUD_TOPIC__, which is replaced by the cloud's
+          topic; see depth_obstacles.
+
+  depth_obstacles:
+    type: object
+    x-group: Inputs
+    description: >-
+      How the depth camera's image becomes the PointCloud2 behind
+      __ROBONIX_DEPTH_CLOUD_TOPIC__: every stride-th pixel, within the range,
+      at most rate_hz times a second. The cloud is in the camera frame; the
+      costmap layers that read it place it through TF and choose the
+      obstacle heights.
+    properties:
+      stride:
+        type: integer
+        minimum: 1
+        maximum: 16
+        default: 4
+        description: Pixel step in both directions.
+      min_range_m:
+        type: number
+        minimum: 0
+        default: 0.2
+        description: Nearer depth readings are dropped, in metres.
+      max_range_m:
+        type: number
+        minimum: 0.5
+        default: 4.0
+        description: Farther depth readings are dropped, in metres.
+      rate_hz:
+        type: number
+        minimum: 0.5
+        maximum: 30
+        default: 10
+        description: Clouds published per second at most.
 
   topic_remap:
     type: object

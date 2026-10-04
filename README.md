@@ -49,6 +49,35 @@ For a 3D lidar, bind `scan_cloud` and declare the adapter explicitly:
         range_max_m: 12.0
 ```
 
+A 2D lidar sees one plane, so a table top or a shelf stays invisible until the
+robot's body meets it. To add a depth camera's view, bind the camera and use
+`__ROBONIX_DEPTH_CLOUD_TOPIC__` in the Nav2 YAML:
+
+```yaml
+      provider_ids:
+        map: mapping
+        odom: chassis
+        scan: lidar
+        depth: head_camera        # provides camera/depth and camera/intrinsics
+      depth_obstacles:            # optional; these are the defaults
+        stride: 4
+        min_range_m: 0.2
+        max_range_m: 4.0
+        rate_hz: 10
+```
+
+The wrapper then turns the camera's depth image, with its own intrinsics, into
+a PointCloud2 in the camera frame on that topic. Costmap layers such as
+`spatio_temporal_voxel_layer` read it and choose the heights that count as
+obstacles for the robot, from just above the floor to the top of its body.
+Without the token the camera is not used.
+
+A `collision_monitor` section in the same YAML starts Nav2's Collision Monitor
+between the velocity smoother and the final velocity guard. Its zones stop or
+slow the robot before anything its sources see, whatever the controller
+planned; `__ROBONIX_SCAN_TOPIC__` and `__ROBONIX_DEPTH_CLOUD_TOPIC__` can be
+its sources. The wrapper sets its input and output topics.
+
 Optional `bt_xml_file` points to a deploy-owned BehaviorTree XML. Existing
 `params_profile` deployments remain supported and emit a migration warning;
 new deployments should not use that field. See `config.spec` for every
@@ -86,8 +115,10 @@ At `Driver(CMD_INIT)`, the wrapper:
 
 1. resolves the selected Atlas providers;
 2. resolves and materializes the deployment-owned Nav2 YAML;
-3. starts an optional PointCloud2-to-LaserScan adapter;
-4. starts Nav2 and waits for the `navigate_to_pose` action server;
+3. starts an optional PointCloud2-to-LaserScan adapter, and the depth cloud
+   when the Nav2 YAML uses it;
+4. starts Nav2, and the Collision Monitor when the YAML configures one, and
+   waits for the `navigate_to_pose` action server;
 5. connects to Nav2's live `speed_limit` subscriber;
 6. exposes navigate, status, cancel, and dynamic speed capabilities.
 
