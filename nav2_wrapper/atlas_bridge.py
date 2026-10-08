@@ -217,26 +217,36 @@ _OPTIONAL_DEPS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# One open channel per consumed contract. Nav2 subscribes to these topics for
+# as long as the service runs, so the channels stay open too: they are how
+# Atlas knows navigation consumes the input, and a sensor fault can then be
+# traced to navigation. Service teardown closes them.
+_dep_channels: dict[str, object] = {}
+
+
 def _resolve_dep(contract_id: str, provider_id: str = "") -> str | None:
     """Ask atlas which ROS2 topic backs `contract_id`; return it or None.
 
     Uses the same ATLAS.find_capability + connect_capability path mapping
-    uses — we want the resolved topic string, and connecting also records
-    nav2 as a consumer of that contract. The Channel is closed immediately."""
+    uses. The channel stays open; resolving the same provider again reuses it."""
     recs = ATLAS.find_capability(
         contract_id=contract_id, transport="ros2", provider_id=provider_id
     )
     if not recs:
         return None
     rec = recs[0]
+    held = _dep_channels.get(contract_id)
+    if held is not None and held.provider_id == rec.provider_id:
+        return (held.endpoint or "").strip() or None
     try:
         ch = nav.connect_capability(rec, contract_id=contract_id, transport="ros2")
     except Exception as e:  # noqa: BLE001
         log.warning("connect %s/%s failed: %s", rec.provider_id, contract_id, e)
         return None
-    endpoint = (ch.endpoint or "").strip()
-    ch.close()
-    return endpoint or None
+    if held is not None:
+        held.close()
+    _dep_channels[contract_id] = ch
+    return (ch.endpoint or "").strip() or None
 
 
 def _build_remap_args(cfg: dict) -> tuple[list[str], list[str]]:
@@ -438,22 +448,22 @@ def _soma_footprint_info() -> tuple[str, float, str]:
     if not records:
         raise RuntimeError(f"required capability unavailable: {contract_id}")
 
-    connection = nav.connect_capability(
+    # One request, so the Atlas channel is released once the reply is in.
+    with nav.connect_capability(
         records[0], contract_id=contract_id, transport="grpc"
-    )
-    endpoint = (connection.endpoint or "").strip()
-    connection.close()
-    if not endpoint:
-        raise RuntimeError(f"{contract_id} resolved to an empty endpoint")
+    ) as connection:
+        endpoint = (connection.endpoint or "").strip()
+        if not endpoint:
+            raise RuntimeError(f"{contract_id} resolved to an empty endpoint")
 
-    channel = grpc.insecure_channel(endpoint)
-    try:
-        grpc.channel_ready_future(channel).result(timeout=10)
-        response = contracts_grpc.RobonixSystemSomaFootprintStub(channel).GetFootprint(
-            soma_pb2.GetFootprint_Request(), timeout=10
-        )
-    finally:
-        channel.close()
+        channel = grpc.insecure_channel(endpoint)
+        try:
+            grpc.channel_ready_future(channel).result(timeout=10)
+            response = contracts_grpc.RobonixSystemSomaFootprintStub(channel).GetFootprint(
+                soma_pb2.GetFootprint_Request(), timeout=10
+            )
+        finally:
+            channel.close()
 
     if not response.base_frame:
         raise ValueError("Soma footprint response has no base_frame")
