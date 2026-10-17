@@ -1,5 +1,9 @@
 import math
 import unittest
+import importlib.util
+import os
+import tempfile
+from unittest.mock import Mock, patch
 
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 
@@ -85,6 +89,73 @@ class RotationGuardTest(unittest.TestCase):
         for i in range(1, 17):
             guard.observe_odom(i * math.pi / 16.0)
             self.assertEqual(guard.evaluate(i * 0.5, 0.0, 0.2, None, None), "")
+
+
+@unittest.skipUnless(importlib.util.find_spec("rclpy"), "requires ROS runtime")
+class ReferenceHelperTest(unittest.TestCase):
+    def test_guard_pause_reset_and_depth_sampling(self):
+        import rclpy
+        import time
+        import numpy as np
+        from geometry_msgs.msg import Twist
+        from sensor_msgs.msg import CameraInfo, Image
+        from nav2_wrapper import velocity_guard, depth_cloud
+
+        reading = [(0, 1, 1)]
+        reference = Mock(read=lambda: reading[0])
+        with tempfile.TemporaryDirectory() as trace_dir, patch.dict(os.environ, {
+            "ROBONIX_VELOCITY_OUTPUT_TOPIC": "/chronos_test/guard_output",
+            "ROBONIX_NAV_MAX_LINEAR_SPEED_MPS": "0.26",
+            "ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE": "100",
+            "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC": "/chronos_test/guard_speed",
+            "ROBONIX_NAV_TRACE_DIR": trace_dir,
+            "ROBONIX_DEPTH_CLOUD_OUT": "/chronos_test/depth_cloud",
+            "ROBONIX_DEPTH_INFO_TOPIC": "/chronos_test/intrinsics",
+            "ROBONIX_DEPTH_IMAGE_TOPIC": "/chronos_test/depth",
+        }), patch.object(velocity_guard, "_ReferenceClock", return_value=reference), \
+                patch.object(depth_cloud, "_ReferenceClock", return_value=reference):
+            rclpy.init(args=["--ros-args", "-p", "use_sim_time:=true"])
+            guard = velocity_guard.VelocityGuardNode()
+            cloud = depth_cloud.DepthCloud()
+            try:
+                self.assertTrue(guard.get_parameter("use_sim_time").value)
+                self.assertTrue(cloud.get_parameter("use_sim_time").value)
+                guard._pub = Mock()
+                guard._begin_goal("old", list(range(16)))
+                command = Twist()
+                command.angular.z = .2
+                guard._on_cmd(command)
+                time.sleep(.03)
+                for _ in range(30):
+                    guard._on_cmd(command)
+                self.assertEqual(guard.guard.latched_reason, "")
+                reading[0] = (0, 2, 1)
+                guard._publish_latched_zero()
+                self.assertIn("reference interrupted", guard.guard.latched_reason)
+                guard._on_cmd(command)
+                self.assertEqual(guard._pub.publish.call_args.args[0].angular.z, 0)
+
+                cloud._pub = Mock()
+                info = CameraInfo(width=1, height=1)
+                info.k = [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+                cloud._on_info(info)
+                frame = Image(width=1, height=1, encoding="32FC1", step=4,
+                              data=np.array([1.], dtype=np.float32).tobytes())
+                cloud._on_depth(frame)
+                for _ in range(30):
+                    cloud._on_depth(frame)
+                self.assertEqual(cloud._pub.publish.call_count, 1)
+                reading[0] = (200_000_000, 2, 1)
+                time.sleep(.11)
+                cloud._on_depth(frame)
+                self.assertEqual(cloud._pub.publish.call_count, 2)
+                reading[0] = (0, 3, 1)
+                cloud._on_depth(frame)
+                self.assertEqual(cloud._pub.publish.call_count, 3)
+            finally:
+                cloud.destroy_node()
+                guard.destroy_node()
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":

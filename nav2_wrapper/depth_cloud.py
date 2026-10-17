@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import os
 import time
+import json
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from robonix_api._reference_time import _ReferenceClock
 
 
 class DepthCloud(Node):
@@ -32,7 +34,12 @@ class DepthCloud(Node):
         self.max_range = float(os.getenv("ROBONIX_DEPTH_MAX_RANGE_M", "4.0"))
         self.period = 1.0 / max(0.1, float(os.getenv("ROBONIX_DEPTH_RATE_HZ", "10")))
         self.info: CameraInfo | None = None
-        self._last = 0.0
+        self._last = None
+        self._last_real = None
+        self._reference = _ReferenceClock(
+            json.loads(os.environ.get("ROBONIX_NAV_REFERENCE", "{}")),
+            "nav2/depth_cloud/reference",
+        )
         self._grid = None
         self._pub = self.create_publisher(PointCloud2, os.environ["ROBONIX_DEPTH_CLOUD_OUT"], qos_profile_sensor_data)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
@@ -61,10 +68,21 @@ class DepthCloud(Node):
         return self._grid[1], self._grid[2]
 
     def _on_depth(self, msg: Image) -> None:
-        now = time.monotonic()
-        if self.info is None or now - self._last < self.period:
+        reading = self._reference.read()
+        if self.info is None or reading is None:
             return
-        self._last = now
+        if self._last is not None and self._last[1:] == reading[1:]:
+            if reading[0] < self._last[0]:
+                raise RuntimeError("Chronos reference moved backwards")
+            if (reading[0] - self._last[0]) / 1e9 < self.period:
+                return
+        else:
+            self._last_real = None
+        real_now = time.monotonic()
+        if self._last_real is not None and real_now - self._last_real < self.period:
+            return
+        self._last = reading
+        self._last_real = real_now
         if msg.encoding in ("32FC1", "32fc1"):
             depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.step // 4)[:, : msg.width]
         elif msg.encoding in ("16UC1", "mono16"):
@@ -87,7 +105,14 @@ class DepthCloud(Node):
         out.row_step = 12 * out.width
         out.is_dense = True
         out.data = xyz.tobytes()
+        current = self._reference.read()
+        if current is None or current[1:] != reading[1:]:
+            return
         self._pub.publish(out)
+
+    def destroy_node(self):
+        self._reference.close()
+        return super().destroy_node()
 
 
 def main() -> None:

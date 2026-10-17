@@ -2,10 +2,164 @@ import os
 import subprocess
 import tempfile
 import unittest
+import importlib.util
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@unittest.skipUnless(importlib.util.find_spec("navigation_mcp"), "requires generated MCP bindings")
+class ReferenceNavigationTest(unittest.TestCase):
+    def setUp(self):
+        from nav2_wrapper import atlas_bridge as bridge
+        self.bridge = bridge
+        self.reading = (0, 1, 1)
+        self.patch = patch.object(bridge, "_reference", Mock(read=lambda: self.reading))
+        self.patch.start()
+        self.node_patch = patch.object(bridge, "_ros_node", Mock())
+        self.node_patch.start()
+        bridge._goal_states.clear()
+        bridge._goal_handles.clear()
+        bridge._goal_references.clear()
+        while not bridge._nav_queue.empty():
+            bridge._nav_queue.get_nowait()
+        self.goal = SimpleNamespace(header=SimpleNamespace(frame_id="map"), pose=SimpleNamespace(
+            position=SimpleNamespace(x=0, y=0), orientation=SimpleNamespace(z=0, w=1)))
+
+    def tearDown(self):
+        self.node_patch.stop()
+        self.patch.stop()
+
+    def test_zero_reference_queue_and_late_acceptance_cannot_cross_reset(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        self.assertTrue(b._goal_current(run))
+        b._interrupt_old_goals()
+        self.assertEqual(b._status_impl(run)["state"], "PENDING")
+        self.reading = (0, 2, 1)
+        with patch.object(b, "_nav_action_client", Mock()) as client:
+            b._dispatch_goal(Mock(), run, {})
+            client.send_goal_async.assert_not_called()
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+        handle = Mock(accepted=True)
+        b._goal_response_cb(Mock(result=lambda: handle), run)
+        handle.cancel_goal_async.assert_called_once()
+        self.assertEqual(b._status_impl(run)["state"], "RUNNING")
+        self.assertIs(b._goal_handles[run], handle)
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+
+    def test_stale_result_and_old_generation_request_are_rejected(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        self.reading = (0, 2, 1)
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=4)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+        self.assertFalse(b._navigate_impl(self.goal, expected_generation=1)["accepted"])
+        self.reading = None
+        self.assertFalse(b._navigate_impl(self.goal)["accepted"])
+
+    def test_cancel_before_submission_rejects_only_the_owned_delayed_goal(self):
+        import uuid
+        b = self.bridge
+        owned = str(uuid.uuid4())
+        unrelated = b._navigate_impl(self.goal)["run_id"]
+        self.assertTrue(b._cancel_impl(owned)["accepted"])
+        self.assertFalse(b._navigate_impl(self.goal, requested_run_id=owned, request_deadline=__import__("time").time()+5)["accepted"])
+        self.assertEqual(b._status_impl(owned)["state"], "CANCELED")
+        self.assertEqual(b._status_impl(unrelated)["state"], "PENDING")
+
+    def test_owned_submission_expiry_and_uuid_cancel_normalization(self):
+        import uuid
+        b = self.bridge
+        owned = str(uuid.uuid4())
+        self.assertFalse(b._navigate_impl(self.goal, requested_run_id=owned, request_deadline=0)["accepted"])
+        run = b._navigate_impl(self.goal)["run_id"]
+        handle = Mock()
+        b._goal_handles[run] = handle
+        b._goal_states[run]["state"] = "RUNNING"
+        self.assertTrue(b._cancel_impl(run.replace("-", "").upper())["accepted"])
+        handle.cancel_goal_async.assert_called_once()
+
+    def test_late_acceptance_retains_ownership_until_terminal_result(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        self.reading = (0, 2, 1)
+        handle = Mock(accepted=True)
+        with patch.object(b, "_restore_speed_after_run") as restore:
+            b._goal_response_cb(Mock(result=lambda: handle), run)
+            restore.assert_not_called()
+            self.assertIn(run, b._goal_references)
+            self.assertIs(b._goal_handles[run], handle)
+            handle.cancel_goal_async.assert_called_once()
+            b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
+            restore.assert_called_once_with(run)
+        self.assertNotIn(run, b._goal_references)
+        self.assertNotIn(run, b._goal_handles)
+
+    def test_interrupted_active_goal_does_not_claim_terminal_after_cancel_failure(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        handle = Mock(cancel_goal_async=Mock(side_effect=RuntimeError("no reply")))
+        b._goal_handles[run] = handle
+        b._goal_states[run]["state"] = "RUNNING"
+        self.reading = (0, 2, 1)
+        b._interrupt_old_goals()
+        self.assertEqual(b._status_impl(run)["state"], "RUNNING")
+        self.assertIs(b._goal_handles[run], handle)
+        self.assertFalse(b._cancel_impl(run)["accepted"])
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+
+    def test_temporary_reference_loss_stays_interrupted_after_recovery(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        handle = Mock(cancel_goal_async=Mock(side_effect=RuntimeError("cancel rejected")))
+        b._goal_handles[run] = handle
+        b._goal_states[run]["state"] = "RUNNING"
+        self.reading = None
+        b._interrupt_old_goals()
+        self.reading = (0, 1, 1)
+        b._goal_states[run]["cancel_retry_at"] = 0
+        b._interrupt_old_goals()
+        self.assertEqual(handle.cancel_goal_async.call_count, 2)
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=4)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+
+    def test_result_received_before_interruption_cannot_overwrite_failure(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        def result():
+            self.reading = (0, 2, 1)
+            b._interrupt_old_goals()
+            return SimpleNamespace(status=4)
+        b._result_cb(Mock(result=result), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+
+    def test_failed_init_closes_reference_and_joins_ros_worker(self):
+        b = self.bridge
+        cfg = {"params_file": "unused", "dynamic_speed": {"max_linear_speed_mps": .26,
+               "default_percentage": 100, "step_percentage": 20, "min_percentage": 20}}
+        for failure in ("spawn", "action", "speed"):
+            reference = Mock()
+            worker = Mock(is_alive=lambda: False, ident=1)
+            with self.subTest(failure=failure), patch.object(b, "_initialized", False), \
+                 patch.object(b, "_build_remap_args", return_value=([], [])), \
+                 patch.object(b, "_ReferenceClock", return_value=reference), \
+                 patch.object(b, "_prepare_scan", return_value=[]), \
+                 patch.object(b, "_spawn_nav2", side_effect=RuntimeError("spawn") if failure == "spawn" else None), \
+                 patch.object(b, "_kill_nav2") as kill, \
+                 patch.object(b, "_start_ros2_thread"), \
+                 patch.object(b, "_ros_thread", worker), \
+                 patch.object(b, "_wait_for_action", return_value=failure != "action"), \
+                 patch.object(b, "_wait_for_speed_subscriber", return_value=False):
+                b.init(cfg)
+                kill.assert_called_once()
+                reference.close.assert_called_once()
+                worker.join.assert_called_once()
 
 
 class RuntimeIntegrationTest(unittest.TestCase):
@@ -144,7 +298,7 @@ class RuntimeIntegrationTest(unittest.TestCase):
 
         self.assertIn("from nav2_msgs.msg import SpeedLimit", source)
         self.assertIn(
-            "node.create_publisher(\n            _SpeedLimit, settings.topic, 10",
+            "node.create_publisher(\n                _SpeedLimit, settings.topic, 10",
             source,
         )
         self.assertIn(
@@ -202,19 +356,10 @@ class RuntimeIntegrationTest(unittest.TestCase):
         self.assertLess(validation, discovery)
         self.assertIn('return Err(f"invalid velocity_output_topic: {error}")', source)
 
-    def test_failed_init_cleans_up_nav_children(self):
-        source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
-        self.assertIn(
-            'except Exception as e:  # noqa: BLE001\n        _kill_nav2()\n'
-            '        return Err(f"spawn nav2 failed: {e}")',
-            source,
-        )
-
     def test_cancel_is_latched_before_action_handle_exists(self):
         source = (ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text()
         self.assertIn('state["cancel_requested"] = True', source)
         self.assertIn('state["state"] = "CANCELED"', source)
-        self.assertIn("cancel queued until goal acceptance", source)
         self.assertIn("if cancel_requested:\n        _issue_cancel(gh, gid)", source)
         self.assertIn("def _cancel_response_cb", source)
 

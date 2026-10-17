@@ -20,6 +20,16 @@ description: >-
   enforced by the final velocity guard.
 
 properties:
+  reference:
+    type: object
+    description: Selected reference inherited from the deployment for navigation and helper evidence budgets.
+    properties:
+      kind:
+        type: string
+        enum: [linux_system, ros_time]
+      provider_id:
+        type: string
+        description: Chronos provider ID for ros_time; defaults to chronos.
   params_file:
     type: string
     x-group: Nav2 parameters
@@ -53,7 +63,8 @@ properties:
     description: >-
       Run Nav2 and the wrapper's ROS node on /clock simulated time. Enable it
       only when the whole TF and sensor graph publishes simulated time. The
-      velocity guard always uses system time.
+      independently spawned guard, depth and scan helpers inherit this setting.
+      A ros_time reference requires use_sim_time=true.
 
   provider_ids:
     type: object

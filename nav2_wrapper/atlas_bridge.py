@@ -26,6 +26,7 @@ Config (passed via Driver(CMD_INIT, config_json)):
 from __future__ import annotations
 
 import logging
+import json
 import math
 import os
 import queue
@@ -116,6 +117,7 @@ from navigation_mcp import (  # noqa: E402
 # server, and heartbeat — so this package no longer talks to the raw
 # AtlasStub (its old RegisterCapability RPC no longer exists).
 from robonix_api import Service, Ok, Err, Deferred, ATLAS  # noqa: E402
+from robonix_api._reference_time import _ReferenceClock
 
 CAP_ID = os.environ.get("ROBONIX_CAPABILITY_ID", "nav2")
 NAMESPACE = "robonix/service/navigation"
@@ -123,6 +125,11 @@ NAMESPACE = "robonix/service/navigation"
 # The provider. on_init (below) does the nav2 bring-up; nav.run() serves
 # the Driver lifecycle + registers + heartbeats.
 nav = Service(id=CAP_ID, namespace=NAMESPACE)
+_reference = _ReferenceClock(None, CAP_ID + "/reference")
+_goal_references = {}
+_ros_stop = threading.Event()
+_ros_thread = None
+_ros_spin_at = time.monotonic()
 
 
 # ── shared state ─────────────────────────────────────────────────────────────
@@ -357,6 +364,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
             "-p", f"fixed_frame_id:={projection['deskew_fixed_frame']}",
             "-p", f"wait_for_transform:={projection['deskew_wait_for_transform_s']}",
             "-p", "slerp:=true",
+            "-p", f"use_sim_time:={str(bool(cfg.get('use_sim_time', False))).lower()}",
         ]
         try:
             _scan_deskew_proc = subprocess.Popen(
@@ -390,6 +398,7 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
         "-p", f"range_min:={range_min:.3f}",
         "-p", f"range_max:={projection['range_max_m']}",
         "-p", "use_inf:=true",
+        "-p", f"use_sim_time:={str(bool(cfg.get('use_sim_time', False))).lower()}",
     ]
     try:
         _scan_projector_proc = subprocess.Popen(
@@ -411,7 +420,8 @@ def _prepare_scan(cfg: dict, bindings: list[str]) -> list[str]:
         _kill_scan_projector()
         raise RuntimeError("pointcloud_to_laserscan exited during startup")
     _scan_filter_proc = subprocess.Popen(
-        [sys.executable, "-m", "nav2_wrapper.scan_filter"],
+        [sys.executable, "-m", "nav2_wrapper.scan_filter", "--ros-args", "-p",
+         f"use_sim_time:={str(bool(cfg.get('use_sim_time', False))).lower()}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -520,9 +530,11 @@ def _start_depth_cloud(cfg: dict) -> str:
         "ROBONIX_DEPTH_MIN_RANGE_M": str(tuning.get("min_range_m", 0.2)),
         "ROBONIX_DEPTH_MAX_RANGE_M": str(tuning.get("max_range_m", 4.0)),
         "ROBONIX_DEPTH_RATE_HZ": str(tuning.get("rate_hz", 10)),
+        "ROBONIX_NAV_REFERENCE": json.dumps(cfg.get("reference") or {}),
     })
     _depth_cloud_proc = subprocess.Popen(
-        [sys.executable, "-m", "nav2_wrapper.depth_cloud"],
+        [sys.executable, "-m", "nav2_wrapper.depth_cloud", "--ros-args", "-p",
+         f"use_sim_time:={str(bool(cfg.get('use_sim_time', False))).lower()}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -724,9 +736,11 @@ def _spawn_velocity_guard(cfg: dict) -> None:
         "ROBONIX_GUARD_NO_PROGRESS_S": str(cfg.get("guard_no_progress_s", 3.0)),
         "ROBONIX_GUARD_GLOBAL_TIMEOUT_S": str(cfg.get("guard_global_spin_timeout_s", 25.0)),
         "ROBONIX_GUARD_GLOBAL_ROTATION_RAD": str(cfg.get("guard_global_spin_limit_rad", 6.783185307)),
+        "ROBONIX_NAV_REFERENCE": json.dumps(cfg.get("reference") or {}),
     })
     _velocity_guard_proc = subprocess.Popen(
-        [sys.executable, "-m", "nav2_wrapper.velocity_guard"],
+        [sys.executable, "-m", "nav2_wrapper.velocity_guard", "--ros-args", "-p",
+         f"use_sim_time:={str(bool(cfg.get('use_sim_time', False))).lower()}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -889,68 +903,130 @@ def _refresh_speed_subscriber() -> None:
 
 def _start_ros2_thread() -> None:
     """Spin a rclpy node + ActionClient. Re-entrant: only acts once."""
+    global _ros_thread
+    if _ros_thread is not None and _ros_thread.is_alive():
+        return
+    _ros_stop.clear()
     def _run():
         global _ros_node, _nav_action_client, _nav_action_ready
-        global _speed_publisher, _guard_speed_publisher
-        import rclpy  # type: ignore
-        from rclpy.executors import MultiThreadedExecutor  # type: ignore
-        from rclpy.action import ActionClient  # type: ignore
-        from rclpy.parameter import Parameter  # type: ignore
+        global _speed_publisher, _guard_speed_publisher, _ros_spin_at
+        node = executor = rclpy = None
+        try:
+            import rclpy  # type: ignore
+            from rclpy.executors import MultiThreadedExecutor  # type: ignore
+            from rclpy.action import ActionClient  # type: ignore
+            from rclpy.parameter import Parameter  # type: ignore
 
-        rclpy.init(args=None)
-        # use_sim_time must match nav2 / the TF tree (see _USE_SIM_TIME) so
-        # node.get_clock() — which timestamps goal poses — is on the same
-        # clock domain as the map->odom transform.
-        node = rclpy.create_node(
-            "nav2_wrapper_atlas_bridge",
-            parameter_overrides=[
-                Parameter("use_sim_time", Parameter.Type.BOOL, _USE_SIM_TIME)
-            ],
-        )
-        _ros_node = node
-        _import_ros2()
-        settings = _speed_settings
-        if settings is None:
-            raise RuntimeError("dynamic speed settings are not initialized")
-        _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
-        # Latest local costmap snapshot for failure diagnostics. The rolling
-        # window is robot-centred, so its centre stands in for the pose.
-        from nav_msgs.msg import OccupancyGrid as _OccupancyGrid
-
-        def _on_local_costmap(msg):
-            global _local_costmap_snapshot
-            _local_costmap_snapshot = (
-                list(msg.data), msg.info.width, msg.info.height,
-                msg.info.resolution,
+            rclpy.init(args=None)
+            # use_sim_time must match nav2 / the TF tree (see _USE_SIM_TIME) so
+            # node.get_clock() — which timestamps goal poses — is on the same
+            # clock domain as the map->odom transform.
+            node = rclpy.create_node(
+                "nav2_wrapper_atlas_bridge",
+                parameter_overrides=[
+                    Parameter("use_sim_time", Parameter.Type.BOOL, _USE_SIM_TIME)
+                ],
             )
+            _ros_node = node
+            _import_ros2()
+            settings = _speed_settings
+            if settings is None:
+                raise RuntimeError("dynamic speed settings are not initialized")
+            _nav_action_client = ActionClient(node, _NavigateToPose, "navigate_to_pose")
+            # Latest local costmap snapshot for failure diagnostics. The rolling
+            # window is robot-centred, so its centre stands in for the pose.
+            from nav_msgs.msg import OccupancyGrid as _OccupancyGrid
 
-        node.create_subscription(
-            _OccupancyGrid, "local_costmap/costmap", _on_local_costmap, 1
-        )
-        _speed_publisher = node.create_publisher(
-            _SpeedLimit, settings.topic, 10
-        )
-        _guard_speed_publisher = node.create_publisher(
-            _SpeedLimit,
-            _GUARD_SPEED_LIMIT_TOPIC,
-            10,
-        )
-        node.create_timer(1.0, _refresh_speed_subscriber)
-        executor = MultiThreadedExecutor()
-        executor.add_node(node)
-        log.info(
-            "rclpy node up; waiting on navigate_to_pose and speed-limit subscriber"
-        )
-        while rclpy.ok():
-            executor.spin_once(timeout_sec=0.05)
-            # Drain goals queued by Navigate gRPC handler.
-            while True:
-                try:
-                    gid, payload = _nav_queue.get_nowait()
-                except queue.Empty:
-                    break
-                _dispatch_goal(node, gid, payload)
-    threading.Thread(target=_run, daemon=True).start()
+            def _on_local_costmap(msg):
+                global _local_costmap_snapshot
+                _local_costmap_snapshot = (
+                    list(msg.data), msg.info.width, msg.info.height,
+                    msg.info.resolution,
+                )
+
+            node.create_subscription(
+                _OccupancyGrid, "local_costmap/costmap", _on_local_costmap, 1
+            )
+            _speed_publisher = node.create_publisher(
+                _SpeedLimit, settings.topic, 10
+            )
+            _guard_speed_publisher = node.create_publisher(
+                _SpeedLimit,
+                _GUARD_SPEED_LIMIT_TOPIC,
+                10,
+            )
+            node.create_timer(1.0, _refresh_speed_subscriber)
+            executor = MultiThreadedExecutor()
+            executor.add_node(node)
+            log.info(
+                "rclpy node up; waiting on navigate_to_pose and speed-limit subscriber"
+            )
+            while rclpy.ok() and not _ros_stop.is_set():
+                executor.spin_once(timeout_sec=0.05)
+                _ros_spin_at = time.monotonic()
+                _interrupt_old_goals()
+                # Drain goals queued by Navigate gRPC handler.
+                while True:
+                    try:
+                        gid, payload = _nav_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    _dispatch_goal(node, gid, payload)
+        finally:
+            _ros_node = _nav_action_client = None
+            _nav_action_ready = False
+            try:
+                if executor is not None:
+                    executor.shutdown(timeout_sec=2)
+                if node is not None:
+                    node.destroy_node()
+            finally:
+                if rclpy is not None and rclpy.ok():
+                    rclpy.shutdown()
+    _ros_thread = threading.Thread(target=_run, daemon=True)
+    _ros_thread.start()
+
+
+def _goal_current(gid):
+    try:
+        reading = _reference.read()
+    except RuntimeError as exc:
+        log.error("navigation reference failed: %s", exc)
+        return False
+    expected = _goal_references.get(gid)
+    return (reading is not None and expected is not None
+            and not _goal_states.get(gid, {}).get("interrupted")
+            and reading[1:] == expected[1:] and reading[0] >= expected[0])
+
+
+def _interrupt_old_goals():
+    with _state_lock:
+        active = [gid for gid, state in _goal_states.items()
+                  if state.get("state") in {"PENDING", "RUNNING"}]
+    for gid in active:
+        if (_goal_current(gid) and (_nav2_proc is None or _nav2_proc.poll() is None)
+                and (_ros_thread is None or (_ros_thread.is_alive() and time.monotonic() - _ros_spin_at <= 5))):
+            continue
+        with _state_lock:
+            state = _goal_states.get(gid, {})
+            if state.get("state") not in {"PENDING", "RUNNING"}:
+                continue
+            pending = state.get("state") == "PENDING"
+            if pending:
+                state.update(state="FAILED", detail="Chronos reference interrupted")
+                _goal_references.pop(gid, None)
+            else:
+                # A sent goal may still be accepted. Keep ownership until its
+                # action result confirms termination, even if cancel is rejected.
+                state["interrupted"] = True
+                if time.monotonic() < state.get("cancel_retry_at", 0.0):
+                    continue
+                state["cancel_retry_at"] = time.monotonic() + 1.0
+                state["detail"] = "Chronos reference interrupted; requesting navigation cancellation"
+        if pending:
+            _restore_speed_after_run(gid)
+        else:
+            _cancel_impl(gid)
 
 
 def _wait_for_action(timeout_s: float) -> bool:
@@ -1089,6 +1165,7 @@ def _goal_response_cb(fut, gid: str):
                 "detail": "canceled before acceptance" if canceled else str(e),
             }
         _restore_speed_after_run(gid)
+        _goal_references.pop(gid, None)
         return
     if not gh.accepted:
         with _state_lock:
@@ -1099,19 +1176,20 @@ def _goal_response_cb(fut, gid: str):
                 "detail": "canceled before acceptance" if canceled else "goal rejected",
             }
         _restore_speed_after_run(gid)
+        _goal_references.pop(gid, None)
         return
     with _state_lock:
+        interrupted = not _goal_current(gid)
         previous = _goal_states.get(gid, {})
-        cancel_requested = bool(previous.get("cancel_requested"))
+        cancel_requested = interrupted or bool(previous.get("cancel_requested"))
         _goal_handles[gid] = gh
         _goal_states[gid] = {
             "state": "RUNNING",
-            "detail": (
-                "goal accepted; forwarding queued cancel"
-                if cancel_requested
-                else "goal accepted"
-            ),
+            "detail": "Chronos reference interrupted; canceling accepted goal" if interrupted else (
+                "goal accepted; forwarding queued cancel" if cancel_requested else "goal accepted"),
             "cancel_requested": cancel_requested,
+            "interrupted": interrupted,
+            "cancel_retry_at": time.monotonic() + 1.0 if interrupted else 0.0,
         }
     res_fut = gh.get_result_async()
     res_fut.add_done_callback(lambda f: _result_cb(f, gid))
@@ -1154,6 +1232,8 @@ def _issue_cancel(goal_handle, gid: str) -> tuple[bool, str]:
 
 def _feedback_cb(message, gid: str) -> None:
     """Keep progress context because Humble NavigateToPose has an empty result."""
+    if not _goal_current(gid):
+        return
     feedback = message.feedback
     pose = feedback.current_pose.pose.position
     summary = {
@@ -1171,36 +1251,39 @@ def _feedback_cb(message, gid: str) -> None:
 def _result_cb(fut, gid: str):
     try:
         res = fut.result()
-        st_name = _goal_status_name(getattr(res, "status", -1))
-        state = _canonical_state(st_name)
         with _state_lock:
-            previous = _goal_states.get(gid, {})
-            diagnostics = list(_nav_diagnostics) if state == "FAILED" else []
-            if state == "FAILED" and _local_costmap_snapshot is not None:
-                blockage = summarize_blockage(*_local_costmap_snapshot)
-                if blockage:
-                    diagnostics.append(blockage)
-                    log.warning("[nav-diag] %s", blockage)
-            _goal_states[gid] = {
-                "state": state,
-                "detail": format_result_detail(
-                    st_name, previous.get("feedback"), diagnostics
-                ),
-            }
+            if not _goal_current(gid):
+                state = "FAILED"
+                detail = "Chronos reference interrupted"
+            else:
+                st_name = _goal_status_name(getattr(res, "status", -1))
+                state = _canonical_state(st_name)
+                previous = _goal_states.get(gid, {})
+                diagnostics = list(_nav_diagnostics) if state == "FAILED" else []
+                if state == "FAILED" and _local_costmap_snapshot is not None:
+                    blockage = summarize_blockage(*_local_costmap_snapshot)
+                    if blockage:
+                        diagnostics.append(blockage)
+                        log.warning("[nav-diag] %s", blockage)
+                detail = format_result_detail(st_name, previous.get("feedback"), diagnostics)
+            _goal_states[gid] = {"state": state, "detail": detail}
             _goal_handles.pop(gid, None)
+            _goal_references.pop(gid, None)
     except Exception as e:  # noqa: BLE001
         with _state_lock:
             _goal_states[gid] = {"state": "FAILED", "detail": str(e)}
             _goal_handles.pop(gid, None)
+            _goal_references.pop(gid, None)
     _restore_speed_after_run(gid)
 
 
 def _dispatch_goal(node, gid: str, payload: dict):
+    if not _goal_current(gid):
+        _interrupt_old_goals()
+        return
     with _state_lock:
         current = _goal_states.get(gid)
-        if current is None:
-            return
-        if current.get("state") == "CANCELED" and current.get("cancel_requested"):
+        if current is None or current.get("state") != "PENDING" or not _goal_current(gid):
             return
         # Claim the queue entry while holding the same lock used by cancel.
         # A cancel racing after this point is latched and forwarded as soon as
@@ -1215,6 +1298,7 @@ def _dispatch_goal(node, gid: str, payload: dict):
             _goal_states[gid] = {"state": "FAILED",
                                  "detail": "nav action server not ready"}
         _restore_speed_after_run(gid)
+        _goal_references.pop(gid, None)
         return
     with _state_lock:
         _nav_diagnostics.clear()
@@ -1222,18 +1306,6 @@ def _dispatch_goal(node, gid: str, payload: dict):
         goal_msg, feedback_callback=lambda msg, g=gid: _feedback_cb(msg, g)
     )
     send_future.add_done_callback(lambda f, g=gid: _goal_response_cb(f, g))
-    with _state_lock:
-        previous = _goal_states.get(gid, {})
-        cancel_requested = bool(previous.get("cancel_requested"))
-        _goal_states[gid] = {
-            "state": "RUNNING",
-            "detail": (
-                "goal sent; cancel queued until acceptance"
-                if cancel_requested
-                else "goal sent"
-            ),
-            "cancel_requested": cancel_requested,
-        }
 
 
 # ── lifecycle (Driver CMD_INIT / CMD_SHUTDOWN via robonix_api.Service) ────────
@@ -1254,12 +1326,16 @@ def init(cfg: dict):
     The navigate/status/cancel gRPC and MCP interfaces are hosted + declared by
     run() (see attach_grpc_servicer below); each guards on `_ros_node`, so
     a call landing before nav2 is ready returns a clean 'not initialized'."""
-    global _initialized, _speed_settings, _speed_percentage
+    global _initialized, _speed_settings, _speed_percentage, _reference
     global _session_speed_percentage, _speed_scope, _speed_scope_run_id
     global _speed_subscriber_connected
     with _state_lock:
         if _initialized:
             return Ok()
+    cfg = dict(cfg)
+    cfg.setdefault("use_sim_time", (cfg.get("reference") or {}).get("kind") == "ros_time")
+    if (cfg.get("reference") or {}).get("kind") == "ros_time" and not cfg["use_sim_time"]:
+        return Err("ros_time reference requires use_sim_time=true")
 
     # Reject an ambiguous velocity destination before Atlas discovery or any
     # scan/Nav2 child is started.  _spawn_velocity_guard resolves it again and
@@ -1291,20 +1367,27 @@ def init(cfg: dict):
             f"(awaiting upstream provider)"
         )
 
+    _reference.close()
+    _reference = _ReferenceClock(cfg.get("reference"), CAP_ID + "/reference")
+
     global _USE_SIM_TIME
     _USE_SIM_TIME = bool(cfg.get("use_sim_time", False))
 
     try:
         _spawn_nav2(cfg, _prepare_scan(cfg, remap_args))
     except Exception as e:  # noqa: BLE001
-        _kill_nav2()
+        shutdown()
         return Err(f"spawn nav2 failed: {e}")
 
-    _start_ros2_thread()
+    try:
+        _start_ros2_thread()
+    except Exception as error:
+        shutdown()
+        return Err(f"navigation ROS startup failed: {error}")
     if not _wait_for_action(action_wait):
         # A failed Driver.Init must not orphan controller, scan, or guard
         # process groups after rbnx reports the package as failed.
-        _kill_nav2()
+        shutdown()
         return Err(
             f"navigate_to_pose action server did not come up within {action_wait:.1f}s"
         )
@@ -1312,10 +1395,10 @@ def init(cfg: dict):
     try:
         speed_ready = _wait_for_speed_subscriber(speed_wait)
     except Exception as error:  # noqa: BLE001
-        _kill_nav2()
+        shutdown()
         return Err(f"failed to apply initial navigation speed: {error}")
     if not speed_ready:
-        _kill_nav2()
+        shutdown()
         return Err(
             "Nav2 controller or final velocity guard did not subscribe to "
             f"its speed-limit channel within {speed_wait:.1f}s "
@@ -1355,9 +1438,16 @@ def _declare_costmap() -> None:
 
 @nav.on_shutdown
 def shutdown():
-    """INACTIVE/ACTIVE → TERMINATED. Tear the nav2 subprocess down so it
-    doesn't outlive the wrapper. Best-effort; never fails shutdown."""
+    """Stop child processes and join the owned ROS worker."""
     _kill_nav2()
+    _ros_stop.set()
+    try:
+        if _ros_thread is not None and _ros_thread.ident is not None:
+            _ros_thread.join(timeout=4)
+            if _ros_thread.is_alive():
+                raise RuntimeError("navigation ROS worker did not stop")
+    finally:
+        _reference.close()
     return Ok()
 
 
@@ -1366,17 +1456,29 @@ def _quat_to_yaw(z: float, w: float) -> float:
     return 2.0 * math.atan2(z, w)
 
 
-def _navigate_impl(goal) -> dict:
+def _navigate_impl(goal, expected_generation=None, requested_run_id=None, request_deadline=None) -> dict:
     """Queue a Nav2 goal and return the contract-level response fields."""
     global _last_run_id
     if _ros_node is None:
         return {"accepted": False, "run_id": "", "detail": "ROS2 not initialized"}
-    run_id = str(uuid.uuid4())
+    reading = _reference.read()
+    if reading is None or (expected_generation is not None and str(reading[1]) != str(expected_generation)):
+        return {"accepted": False, "run_id": "", "detail": "Chronos reference unavailable or changed"}
+    if requested_run_id:
+        if request_deadline is None or not 0 < float(request_deadline) - time.time() <= 10:
+            return {"accepted": False, "run_id": "", "detail": "navigation request deadline expired or invalid"}
+        run_id = str(uuid.UUID(requested_run_id))
+    else:
+        run_id = str(uuid.uuid4())
     frame_id = goal.header.frame_id or "map"
     yaw = _quat_to_yaw(goal.pose.orientation.z, goal.pose.orientation.w)
     with _state_lock:
+        _prune_pending_cancels()
+        if run_id in _goal_states:
+            return {"accepted": False, "run_id": run_id, "detail": "run_id already submitted or canceled"}
         _last_run_id = run_id
         _goal_states[run_id] = {"state": "PENDING", "detail": "queued"}
+        _goal_references[run_id] = reading
     _nav_queue.put((run_id, {
         "frame_id": frame_id,
         "x": float(goal.pose.position.x),
@@ -1388,6 +1490,7 @@ def _navigate_impl(goal) -> dict:
 
 def _status_impl(run_id: str) -> dict:
     """Return state/detail for an explicit run id, or the most recent run."""
+    _interrupt_old_goals()
     with _state_lock:
         resolved = _resolve_run_id(run_id)
         st = _goal_states.get(resolved)
@@ -1400,14 +1503,38 @@ def _status_impl(run_id: str) -> dict:
     }
 
 
+def _prune_pending_cancels():
+    now = time.monotonic()
+    for gid, state in list(_goal_states.items()):
+        until = state.get("cancel_before_submission_until")
+        if until is not None and now >= until:
+            del _goal_states[gid]
+
+
 def _cancel_impl(run_id: str) -> dict:
     """Cancel an explicit run id, or the most recent active navigation run."""
     restore_speed = False
+    try:
+        run_id = str(uuid.UUID(run_id))
+    except (ValueError, TypeError, AttributeError):
+        pass
     with _state_lock:
+        _prune_pending_cancels()
         resolved = _resolve_run_id(run_id)
         state = _goal_states.get(resolved)
         if state is None:
-            return {"accepted": False, "detail": "unknown run_id"}
+            # Retain an explicit UUID cancellation so delayed submission cannot start it.
+            try:
+                canceled_id = str(uuid.UUID(run_id))
+            except (ValueError, TypeError, AttributeError):
+                return {"accepted": False, "detail": "unknown run_id"}
+            if sum("cancel_before_submission_until" in s for s in _goal_states.values()) >= 1024:
+                return {"accepted": False, "detail": "too many pending navigation cancellations"}
+            _goal_states[canceled_id] = {
+                "state": "CANCELED", "detail": "canceled before submission",
+                "cancel_before_submission_until": time.monotonic() + 30,
+            }
+            return {"accepted": True, "detail": "canceled before submission"}
         if state.get("state") in {"SUCCEEDED", "FAILED", "CANCELED"}:
             return {
                 "accepted": False,
@@ -1429,6 +1556,7 @@ def _cancel_impl(run_id: str) -> dict:
             state["detail"] = "submitting cancel to Nav2"
             detail = state["detail"]
     if restore_speed:
+        _goal_references.pop(resolved, None)
         _restore_speed_after_run(resolved)
         return {"accepted": True, "detail": detail}
     if gh is None:
@@ -1587,7 +1715,8 @@ def _get_speed_limit_impl() -> dict:
 # ── gRPC servicers ───────────────────────────────────────────────────────────
 class _NavigateServicer(contracts_grpc.RobonixServiceNavigationNavigateServicer):
     def Navigate(self, request, context):
-        out = _navigate_impl(request.goal)
+        metadata = dict(context.invocation_metadata())
+        out = _navigate_impl(request.goal, metadata.get("robonix-reference-generation"))
         return navigation_pb2.Navigate_Response(**out)
 
 
@@ -1640,7 +1769,12 @@ class _GetSpeedLimitServicer(
 @nav.mcp("robonix/service/navigation/navigate")
 def navigate(req: McpNavigateRequest) -> McpNavigateResponse:
     """Start a Nav2 NavigateToPose run. Returns a run_id for status/cancel."""
-    out = _navigate_impl(req.goal)
+    context = nav._mcp_app.get_context()
+    metadata = context.request_context.meta
+    expected = getattr(metadata, "robonix-reference-generation", None) if metadata is not None else None
+    requested = getattr(metadata, "robonix-navigation-run-id", None) if metadata is not None else None
+    deadline = getattr(metadata, "robonix-navigation-deadline-unix-s", None) if metadata is not None else None
+    out = _navigate_impl(req.goal, expected, requested, deadline)
     if not out["accepted"]:
         raise RuntimeError(out["detail"])
     return McpNavigateResponse(**out)

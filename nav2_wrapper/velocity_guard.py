@@ -19,12 +19,14 @@ from nav2_msgs.msg import SpeedLimit
 from nav_msgs.msg import Odometry, Path as NavPath
 from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
 
 from nav2_wrapper.cmd_vel_summary import CmdVelSummary
 from nav2_wrapper.configuration import resolve_velocity_output_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 from nav2_wrapper.velocity_limit import bounded_linear_velocity
+from robonix_api._reference_time import _ReferenceClock
 
 
 def _yaw(q) -> float:
@@ -61,6 +63,12 @@ class VelocityGuardNode(Node):
                 "ROBONIX_NAV_DEFAULT_SPEED_PERCENTAGE must be in (0, 100]"
             )
         super().__init__("robonix_velocity_guard")
+        self._reference = _ReferenceClock(
+            json.loads(os.environ.get("ROBONIX_NAV_REFERENCE", "{}")),
+            "nav2/velocity_guard/reference",
+        )
+        self._goal_reference = None
+        self._last_command_at = time.monotonic()
         limits = GuardLimits(
             terminal_xy_m=float(os.getenv("ROBONIX_GUARD_TERMINAL_XY_M", "0.45")),
             terminal_timeout_s=float(os.getenv("ROBONIX_GUARD_TERMINAL_TIMEOUT_S", "15.0")),
@@ -107,7 +115,8 @@ class VelocityGuardNode(Node):
             20,
         )
         self._cancel = self.create_client(CancelGoal, "/navigate_to_pose/_action/cancel_goal")
-        self.create_timer(0.05, self._publish_latched_zero)
+        self.create_timer(0.05, self._publish_latched_zero,
+                          clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.get_logger().info(
             f"guard active; output={output_topic}; "
             f"max_linear={max_linear_speed_mps:g}m/s; "
@@ -162,6 +171,7 @@ class VelocityGuardNode(Node):
         self._robot_pose = None
         self._goal_pose = None
         self.guard.begin_goal(goal_uuid)
+        self._goal_reference = self._read_reference()
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self._trace = (self._trace_dir / f"{stamp}-{goal_uuid}.jsonl").open("a", encoding="utf-8")
         self._event("goal_active", uuid=goal_uuid)
@@ -291,7 +301,14 @@ class VelocityGuardNode(Node):
                 output.angular.y = msg.angular.y
                 output.angular.z = msg.angular.z
             self._last_cmd = (math.hypot(x, y), float(output.angular.z))
-            now_s = self.get_clock().now().nanoseconds / 1e9
+            self._last_command_at = time.monotonic()
+            reading = self._read_reference()
+            reason = self._reference_failure(reading)
+            if reason:
+                self._trip(reason)
+                self._pub.publish(Twist())
+                return
+            now_s = reading[0] / 1e9
             reason = self.guard.evaluate(
                 now_s,
                 self._last_cmd[0], self._last_cmd[1], self._robot_pose, self._goal_pose,
@@ -316,6 +333,7 @@ class VelocityGuardNode(Node):
                 self._pub.publish(output)
 
     def _trip(self, reason: str) -> None:
+        self.guard.latched_reason = reason
         if self._cancel_sent:
             return
         self._cancel_sent = True
@@ -330,8 +348,38 @@ class VelocityGuardNode(Node):
 
     def _publish_latched_zero(self) -> None:
         with self._lock:
-            if self.guard.latched_reason:
+            reason = self._reference_failure(self._read_reference())
+            if reason and self._active_uuid:
+                self._trip(reason)
+            if self.guard.latched_reason or reason or time.monotonic() - self._last_command_at > 2:
                 self._pub.publish(Twist())
+
+    def _reference_failure(self, reading):
+        if reading is None:
+            return "Chronos reference unavailable"
+        expected = self._goal_reference
+        if self._active_uuid and expected is None:
+            return "Chronos reference unavailable when navigation started"
+        if expected is not None and (reading[1:] != expected[1:] or reading[0] < expected[0]):
+            return "Chronos reference interrupted during navigation"
+        return ""
+
+    def _read_reference(self):
+        try:
+            return self._reference.read()
+        except RuntimeError as exc:
+            self.get_logger().error(str(exc), once=True)
+            return None
+
+    def destroy_node(self):
+        self._pub.publish(Twist())
+        try:
+            self._reference.close()
+        finally:
+            self._scan_log.close()
+            if self._trace is not None:
+                self._trace.close()
+            super().destroy_node()
 
 
 def main() -> None:

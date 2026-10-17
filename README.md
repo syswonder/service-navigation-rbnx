@@ -127,6 +127,20 @@ failure returns `error` and tears down every child process.
 
 ## Build and tests
 
+The deployment's selected `reference` governs guard rotation budgets and depth
+sampling. With `ros_time`, set `use_sim_time: true`; Nav2, the wrapper, velocity
+guard, depth cloud and scan helpers all receive it. The depth cloud and velocity
+guard also receive the reference config through their child environments. Depth clouds keep source
+headers and a separate real CPU throttle. Traces, process checks and transport
+deadlines keep real time. No ROS reference falls back to wall time.
+
+A changed or unavailable reference rejects queued navigation and cancels its
+active action. Sent and accepted goals retain their action handles until a
+terminal result confirms they stopped; cancellation failures remain visible
+and are retried. Late goal acceptance is canceled, and an interrupted goal
+cannot report success after reference or worker recovery. The guard uses a real timer to publish zero on
+reference interruption or missing commands, including during a simulation pause.
+
 Navigation generates only its Atlas MCP bindings on every deployment target.
 It deliberately does not generate, build, or source a Robonix ROS 2 IDL
 overlay: the provider talks to Nav2 through the ROS 2 interfaces supplied by
@@ -136,6 +150,7 @@ the locally built terminal-controller plugin overlay.
 
 ```bash
 bash scripts/build.sh
+export PYTHONPATH="$PWD/rbnx-build/codegen/proto_gen:$PWD/rbnx-build/codegen/robonix_mcp_types:$PYTHONPATH"
 python3 -m unittest -v \
   test_configuration.py \
   test_runtime_integration.py \
