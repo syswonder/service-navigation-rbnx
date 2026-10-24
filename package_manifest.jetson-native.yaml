@@ -22,10 +22,18 @@ stop: ROBONIX_NAV2_FORCE=native bash scripts/stop.sh
 
 capabilities:
   - name: robonix/service/navigation/driver
+    transport: grpc
   - name: robonix/service/navigation/navigate
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/navigate/status
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/navigate/cancel
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/adjust_speed
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/set_speed_limit
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/get_speed_limit
+    transport: [mcp, grpc]
   - name: robonix/service/navigation/costmap
+    transport: ros2
