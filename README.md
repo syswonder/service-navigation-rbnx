@@ -64,6 +64,7 @@ robot's body meets it. To add a depth camera's view, bind the camera and use
         min_range_m: 0.2
         max_range_m: 4.0
         rate_hz: 10
+        source_timeout_s: 1.0
 ```
 
 The wrapper then turns the camera's depth image, with its own intrinsics, into
@@ -71,6 +72,25 @@ a PointCloud2 in the camera frame on that topic. Costmap layers such as
 `spatio_temporal_voxel_layer` read it and choose the heights that count as
 obstacles for the robot, from just above the floor to the top of its body.
 Without the token the camera is not used.
+
+Depth projection and Collision Monitor integration are upstream features.
+The added freshness watchdog in the final velocity guard requires samples
+with strictly increasing, positive source timestamps when depth is enabled.
+Missing samples or no newer sample within `source_timeout_s` latch zero
+velocity and request cancellation of the current `NavigateToPose` UUID.
+The timeout must be finite and positive; it uses
+monotonic elapsed time, not simulation time. Both incoming commands and the
+50 ms timer check it, so stopping does not depend on another velocity command.
+The timer retries cancellation when the service is unavailable or the request
+raises an exception. Depth recovery does not release the same goal, even
+after its terminal status; a new goal and fresh samples are required.
+Timestamps are retained across goals, so replayed
+or out-of-order samples cannot refresh the watchdog. Restart the navigation
+provider after resetting the source clock.
+
+This watchdog detects stream freshness, not obstacles inside the camera's
+minimum range or invalid geometry in an otherwise updating stream. It does not
+replace obstacle retention, collision checking, or physical stop verification.
 
 A `collision_monitor` section in the same YAML starts Nav2's Collision Monitor
 between the velocity smoother and the final velocity guard. Its zones stop or

@@ -17,12 +17,13 @@ from geometry_msgs.msg import Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.msg import SpeedLimit
 from nav_msgs.msg import Odometry, Path as NavPath
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.qos import qos_profile_sensor_data
 
 from nav2_wrapper.cmd_vel_summary import CmdVelSummary
-from nav2_wrapper.configuration import resolve_velocity_output_topic
+from nav2_wrapper.configuration import resolve_velocity_output_topic, validate_absolute_ros_topic
 from nav2_wrapper.rotation_guard_core import GuardLimits, RotationGuard, normalize_uuid_octets
 from nav2_wrapper.velocity_limit import bounded_linear_velocity
 
@@ -49,6 +50,13 @@ class VelocityGuardNode(Node):
         speed_limit_topic = os.environ[
             "ROBONIX_NAV_GUARD_SPEED_LIMIT_TOPIC"
         ]
+        depth_topic = os.getenv("ROBONIX_GUARD_DEPTH_TOPIC", "")
+        depth_timeout_s = 1.0
+        if depth_topic:
+            validate_absolute_ros_topic(depth_topic, "ROBONIX_GUARD_DEPTH_TOPIC")
+            depth_timeout_s = float(os.getenv("ROBONIX_GUARD_DEPTH_TIMEOUT_S", "1.0"))
+            if not math.isfinite(depth_timeout_s) or depth_timeout_s <= 0.0:
+                raise ValueError("ROBONIX_GUARD_DEPTH_TIMEOUT_S must be finite and positive")
         if (
             not math.isfinite(max_linear_speed_mps)
             or max_linear_speed_mps <= 0.0
@@ -77,6 +85,11 @@ class VelocityGuardNode(Node):
         self._last_cmd = (0.0, 0.0)
         self._cmd_summary = CmdVelSummary()
         self._cancel_sent = False
+        self._depth_topic = depth_topic
+        self._depth_timeout_s = depth_timeout_s
+        self._depth_stamp = None
+        self._depth_received_at = None
+        self._depth_fault_latched = False
         self._trace = None
         self._trace_dir = Path(os.getenv("ROBONIX_NAV_TRACE_DIR", "/tmp/robonix-nav-traces"))
         self._trace_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +110,10 @@ class VelocityGuardNode(Node):
         self.create_subscription(Odometry, "/odom", self._on_odom, 50)
         self.create_subscription(NavPath, "/plan", self._on_plan, 10)
         self.create_subscription(LaserScan, "/scanner/scan", self._on_scan, 20)
+        if depth_topic:
+            self.create_subscription(
+                PointCloud2, depth_topic, self._on_depth, qos_profile_sensor_data
+            )
         self.create_subscription(
             GoalStatusArray, "/navigate_to_pose/_action/status", self._on_status, 10
         )
@@ -159,6 +176,7 @@ class VelocityGuardNode(Node):
         self._active_uuid = goal_uuid
         self._active_uuid_raw = normalize_uuid_octets(raw_uuid)
         self._cancel_sent = False
+        self._depth_fault_latched = False
         self._robot_pose = None
         self._goal_pose = None
         self.guard.begin_goal(goal_uuid)
@@ -183,7 +201,8 @@ class VelocityGuardNode(Node):
             )
             if not active and self._active_uuid:
                 self._event("goal_inactive")
-                self.guard.clear_if_idle()
+                if not self._depth_fault_latched:
+                    self.guard.clear_if_idle()
 
     def _on_feedback(self, msg) -> None:
         with self._lock:
@@ -274,6 +293,27 @@ class VelocityGuardNode(Node):
             self._last_scan_summary_at = now
         self._front_min_history.append(front_min)
 
+    def _on_depth(self, msg: PointCloud2) -> None:
+        stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        with self._lock:
+            if stamp > 0 and (self._depth_stamp is None or stamp > self._depth_stamp):
+                self._depth_stamp = stamp
+                self._depth_received_at = time.monotonic()
+
+    def _check_depth(self) -> str:
+        if self._depth_topic and not self.guard.latched_reason:
+            if self._depth_received_at is None:
+                reason = "depth input has not received a sample"
+            elif time.monotonic() - self._depth_received_at >= self._depth_timeout_s:
+                reason = f"depth input timeout after {self._depth_timeout_s:g}s"
+            else:
+                return ""
+            self.guard.latched_reason = reason
+            self._depth_fault_latched = True
+            self.get_logger().error(f"DEPTH GUARD TRIPPED uuid={self._active_uuid}: {reason}")
+            self._event("depth_timeout", reason=reason)
+        return self.guard.latched_reason
+
     def _on_cmd(self, msg: Twist) -> None:
         with self._lock:
             x, y, limited = bounded_linear_velocity(
@@ -292,7 +332,7 @@ class VelocityGuardNode(Node):
                 output.angular.z = msg.angular.z
             self._last_cmd = (math.hypot(x, y), float(output.angular.z))
             now_s = self.get_clock().now().nanoseconds / 1e9
-            reason = self.guard.evaluate(
+            reason = self._check_depth() or self.guard.evaluate(
                 now_s,
                 self._last_cmd[0], self._last_cmd[1], self._robot_pose, self._goal_pose,
             )
@@ -310,28 +350,39 @@ class VelocityGuardNode(Node):
             if line:
                 self.get_logger().info(line)
             if reason:
-                self._trip(reason)
                 self._pub.publish(Twist())
+                self._trip(reason)
             else:
                 self._pub.publish(output)
 
     def _trip(self, reason: str) -> None:
         if self._cancel_sent:
             return
-        self._cancel_sent = True
-        self.get_logger().error(f"ROTATION GUARD TRIPPED uuid={self._active_uuid}: {reason}")
-        self._event("guard_trip", reason=reason)
-        if self._active_uuid_raw is None or not self._cancel.service_is_ready():
+        if (
+            self._active_uuid_raw is None
+            or not any(self._active_uuid_raw)
+            or not self._cancel.service_is_ready()
+        ):
             return
         request = CancelGoal.Request()
         request.goal_info.goal_id.uuid = self._active_uuid_raw
-        self._cancel.call_async(request)
+        try:
+            self._cancel.call_async(request)
+        except Exception as error:
+            self.get_logger().error(f"guard cancel failed uuid={self._active_uuid}: {error}")
+            return
+        self._cancel_sent = True
+        self.get_logger().error(f"VELOCITY GUARD TRIPPED uuid={self._active_uuid}: {reason}")
+        self._event("guard_trip", reason=reason)
         self._event("cancel_requested", uuid=self._active_uuid)
 
     def _publish_latched_zero(self) -> None:
         with self._lock:
+            self._check_depth()
             if self.guard.latched_reason:
                 self._pub.publish(Twist())
+                if self._depth_fault_latched:
+                    self._trip(self.guard.latched_reason)
 
 
 def main() -> None:

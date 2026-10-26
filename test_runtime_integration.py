@@ -1,14 +1,61 @@
+import ast
+import math
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+from nav2_wrapper.configuration import resolve_velocity_output_topic
+from nav2_wrapper.speed_control import speed_settings
 
 
 ROOT = Path(__file__).resolve().parent
 
 
 class RuntimeIntegrationTest(unittest.TestCase):
+    def test_guard_depth_freshness_is_enabled_only_for_a_started_adapter(self):
+        source = ast.parse((ROOT / "nav2_wrapper" / "atlas_bridge.py").read_text())
+        function = next(
+            node for node in source.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_spawn_velocity_guard"
+        )
+        namespace = {
+            "os": os, "sys": sys, "math": math,
+            "subprocess": Mock(), "threading": Mock(),
+            "resolve_velocity_output_topic": resolve_velocity_output_topic,
+            "_speed_settings": speed_settings({"dynamic_speed": {
+                "max_linear_speed_mps": 0.3, "default_percentage": 100,
+            }}),
+            "_GUARD_SPEED_LIMIT_TOPIC": "/test/speed_limit",
+            "_DEPTH_CLOUD_TOPIC": "/test/depth_points",
+            "_pkg_root": ROOT, "_pump_output": Mock(),
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "<guard-spawn>", "exec"), namespace)
+        for enabled, timeout in ((False, None), (True, None), (True, 2.5)):
+            with self.subTest(enabled=enabled, timeout=timeout):
+                namespace["_depth_cloud_proc"] = Mock() if enabled else None
+                namespace["subprocess"].Popen.reset_mock()
+                config = {} if timeout is None else {"depth_obstacles": {"source_timeout_s": timeout}}
+                with patch.dict(os.environ, {"ROBONIX_GUARD_DEPTH_TOPIC": "/inherited/depth"}):
+                    namespace["_spawn_velocity_guard"](config)
+                environment = namespace["subprocess"].Popen.call_args.kwargs["env"]
+                self.assertEqual(
+                    environment["ROBONIX_GUARD_DEPTH_TOPIC"],
+                    "/test/depth_points" if enabled else "",
+                )
+                if enabled:
+                    self.assertEqual(float(environment["ROBONIX_GUARD_DEPTH_TIMEOUT_S"]), timeout or 1.0)
+        for timeout in (0, -1, math.nan, math.inf, -math.inf, "bad"):
+            with self.subTest(timeout=timeout):
+                namespace["_depth_cloud_proc"] = Mock()
+                namespace["subprocess"].Popen.reset_mock()
+                with self.assertRaises(ValueError):
+                    namespace["_spawn_velocity_guard"]({"depth_obstacles": {"source_timeout_s": timeout}})
+                namespace["subprocess"].Popen.assert_not_called()
+
     def test_docker_start_mounts_manifest_directory_read_only(self):
         bash_major = int(
             subprocess.run(

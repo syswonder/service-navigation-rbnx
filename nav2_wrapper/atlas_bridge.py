@@ -724,7 +724,13 @@ def _spawn_velocity_guard(cfg: dict) -> None:
         "ROBONIX_GUARD_NO_PROGRESS_S": str(cfg.get("guard_no_progress_s", 3.0)),
         "ROBONIX_GUARD_GLOBAL_TIMEOUT_S": str(cfg.get("guard_global_spin_timeout_s", 25.0)),
         "ROBONIX_GUARD_GLOBAL_ROTATION_RAD": str(cfg.get("guard_global_spin_limit_rad", 6.783185307)),
+        "ROBONIX_GUARD_DEPTH_TOPIC": _DEPTH_CLOUD_TOPIC if _depth_cloud_proc is not None else "",
     })
+    if _depth_cloud_proc is not None:
+        timeout = float((cfg.get("depth_obstacles") or {}).get("source_timeout_s", 1.0))
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError("depth_obstacles.source_timeout_s must be finite and positive")
+        env["ROBONIX_GUARD_DEPTH_TIMEOUT_S"] = str(timeout)
     _velocity_guard_proc = subprocess.Popen(
         [sys.executable, "-m", "nav2_wrapper.velocity_guard"],
         stdout=subprocess.PIPE,

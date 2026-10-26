@@ -128,6 +128,14 @@ properties:
         maximum: 30
         default: 10
         description: Clouds published per second at most.
+      source_timeout_s:
+        type: number
+        default: 1.0
+        description: >-
+          Finite positive depth-cloud timeout in monotonic seconds. When
+          depth is enabled, missing or stale samples latch zero velocity and
+          request cancellation of the current navigation UUID. Only a new
+          goal with fresh depth can move again.
 
   topic_remap:
     type: object
